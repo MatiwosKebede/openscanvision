@@ -1,0 +1,437 @@
+# Detailed Data Flow: From Printed Card to Scan Result
+
+This section traces the complete journey of a scan – from the moment you tap the app icon to the final result displayed on screen. Every number, coordinate, and parameter used along the way is explained in plain language. This is the definitive guide to how OpenScanVision works internally.
+
+---
+
+## 1. The Printed Card (HTML Template)
+
+Before the app scans anything, the card must be designed. The reference template (in the `template/` folder) defines the physical layout.
+
+### Card Dimensions
+
+- **Card size**: 85 mm wide × 54 mm high.
+- **Internal coordinate system**: 0.1 mm units (so 85 mm = 850 units, 54 mm = 540 units).
+- This is defined in `CardTemplate.kt` as:
+  - `REF_WIDTH = 850`
+  - `REF_HEIGHT = 540`
+
+### QR Code Area
+
+- The QR code is placed in a **16 mm × 18 mm** wrapper, starting at 66 mm from the left and 3 mm from the top.
+- In 0.1 mm units:
+  - Top‑Left: `(660, 30)`
+  - Top‑Right: `(820, 30)`
+  - Bottom‑Right: `(820, 210)`
+  - Bottom‑Left: `(660, 210)`
+- These four corners are stored in `SHARED_QR_CORNERS` inside `CardTemplate.kt`.
+
+### The Three Reference Markers
+
+- Three solid dark squares (5 mm × 5 mm) are placed at the **top‑left**, **bottom‑left**, and **bottom‑right** corners, flush with the card edges.
+- Their centres (in 0.1 mm units) are:
+  - **TL (Top‑Left)**: `(25, 25)`
+  - **BL (Bottom‑Left)**: `(25, 515)`
+  - **BR (Bottom‑Right)**: `(825, 515)`
+- These are stored in `SHARED_MARKER_CORNERS`.
+
+### Bubbles
+
+- **Candidate template** (`VX`): 12 bubbles in a 3×4 grid.
+  - Positions (x, y) in 0.1 mm units:
+    - Row 1: `(58,260)`, `(318,260)`, `(578,260)`
+    - Row 2: `(58,320)`, `(318,320)`, `(578,320)`
+    - Row 3: `(58,380)`, `(318,380)`, `(578,380)`
+    - Row 4: `(58,440)`, `(318,440)`, `(578,440)`
+  - Indices: 0 to 11 (left‑to‑right, top‑to‑bottom).
+  - One answer group: `[0..11]` (all bubbles are mutually exclusive).
+
+- **Agenda template** (`AGN`): 12 bubbles in a 4×3 grid (4 rows, each with 3 options).
+  - Positions (x, y):
+    - Row 1: `(308,260)`, `(488,260)`, `(668,260)`
+    - Row 2: `(308,320)`, `(488,320)`, `(668,320)`
+    - Row 3: `(308,380)`, `(488,380)`, `(668,380)`
+    - Row 4: `(308,440)`, `(488,440)`, `(668,440)`
+  - Groups: `[0..2]`, `[3..5]`, `[6..8]`, `[9..11]` (each row is independent).
+
+### QR Code Content
+
+- The QR code contains a **prefix** followed by a unique identifier.
+  - Candidate card: starts with `VX` (e.g., `VXK8P2M47QFN`).
+  - Agenda card: starts with `AGN` (e.g., `AGN37X1F8Q22`).
+- The prefix tells the app which template to load.
+
+---
+
+## 2. App Launch to Camera Preview
+
+**Flow:** User taps app icon → `MainActivity` starts → `ScannerScreen` composable is displayed.
+
+**Key files:** `MainActivity.kt`, `ui/screens/ScannerScreen.kt`
+
+**Numbers involved:**
+- The camera preview uses a viewfinder frame sized to match the card aspect ratio (85/54).
+- The frame is drawn using `StaticViewfinder` composable in `ScannerOverlays.kt`.
+
+**At this point:** The app is waiting for camera permission and then starts the camera preview with `ImageAnalysis` configured at `1280×720` resolution (set in `startCamera()`).
+
+---
+
+## 3. Frame Capture and Pre‑processing
+
+**Flow:** Every frame from the camera passes through the `ImageAnalysis` analyzer.
+
+**Key file:** `ScannerScreen.kt` – inside `analysis.setAnalyzer { ... }`
+
+**Steps:**
+1. `imageProxy.toBitmap()` (from `ImageProxyExt.kt`) converts the CameraX frame to a full‑resolution `Bitmap` (1280×720).
+2. `downsampleBitmap(bitmap, 800, 450)` creates a downscaled copy for fast edge detection.
+3. The downscaled bitmap (800×450) is passed to `CardDetector.detectCardCorners()`.
+
+**Numbers involved:**
+- `targetResolution = 1280×720`
+- `downsample = 800×450`
+- The downsampling scale factor is computed as `min(800/width, 450/height)`.
+
+---
+
+## 4. QR Detection and Template Loading
+
+**Flow:** The full‑resolution bitmap is sent to ML Kit for QR scanning.
+
+**Key file:** `ScannerScreen.kt` – `barcodeScanner.process(inputImage)`
+
+**What ML Kit returns:**
+- `qrValue` – the decoded text (e.g., `"VXK8P2M47QFN"`).
+- `qrImagePoints` – a list of 4 `PointF` objects containing the pixel coordinates of the QR corners in the full‑resolution image.
+
+**Template loading:**
+- `Templates.fromPrefix(qrValue)` is called.
+- The function checks the prefix:
+  - If it starts with `"VX"`, it returns `Templates.CANDIDATE`.
+  - If it starts with `"AGN"`, it returns `Templates.AGENDA`.
+  - Otherwise, it returns `null` (QR ignored).
+
+**Numbers involved:**
+- The QR corners from ML Kit are in pixel coordinates (e.g., `[ (x1,y1), (x2,y2), (x3,y3), (x4,y4) ]`).
+- These correspond to the four corners of the QR square in the camera image.
+
+---
+
+## 5. Building the QR‑Only Homography
+
+**Flow:** Using the 4 QR corners from the image and the 4 QR reference corners from the template, the app computes an initial perspective transform.
+
+**Key file:** `CardDetector.kt` – `buildRefinedHomography(templatePoints, imagePoints)`
+
+**What happens:**
+- `templatePoints` = `template.qrRefCorners` (the four QR corners in template coordinates).
+- `imagePoints` = `qrImagePoints` (the four QR corners from ML Kit).
+- OpenCV's `findHomography` is called with these 4 point pairs.
+- This produces a 3×3 homography matrix (stored as an Android `Matrix`).
+
+**Numbers involved:**
+- `template.qrRefCorners` = `[ (660,30), (820,30), (820,210), (660,210) ]` (0.1 mm units).
+
+**Result:** A homography that maps any point in template space (0.1 mm units) to image space (pixel coordinates) – based **only** on the QR.
+
+---
+
+## 6. Predicting Marker Positions
+
+**Flow:** The QR‑only homography is used to guess where the three reference markers should appear in the image.
+
+**Key file:** `CardDetector.kt` – `predictImagePoints(templatePoints, homography)`
+
+**What happens:**
+- `templatePoints` = `template.markerRefPositions` (if defined).
+- For each template point (e.g., `(25, 25)` for TL), the homography maps it to a predicted image coordinate.
+- This yields three predicted pixel locations: one for TL, one for BL, one for BR.
+
+**Numbers involved:**
+- `template.markerRefPositions` = `[ (25,25), (825,515), (25,515) ]` (from `SHARED_MARKER_CORNERS`).
+
+---
+
+## 7. Searching for the Actual Markers
+
+**Flow:** Around each predicted marker location, the app searches a small window for dark pixels.
+
+**Key file:** `CardDetector.kt` – `detectRefMarkersNearPredicted(bitmap, predictedPositions)`
+
+**Parameters used:**
+- `MARKER_SEARCH_MARGIN_PX = 40` – half‑size of the search window (in pixels).
+- `MARKER_DARKNESS_THRESHOLD = 80` – red‑channel value below which a pixel counts as "dark".
+- `MARKER_MIN_DARK_PIXELS = 15` – minimum number of dark pixels to accept a marker.
+
+**The search algorithm:**
+1. For each predicted position `(px, py)`:
+   - Define window: left = `px - 40`, right = `px + 40`, top = `py - 40`, bottom = `py + 40`.
+   - Read all pixels inside this window (bulk read).
+   - For each pixel, if `red < 80`, count it as dark and accumulate its x and y.
+   - After scanning, compute the centroid (average x and y) of all dark pixels.
+   - If the count of dark pixels >= 15, accept this centroid as the marker location.
+   - Otherwise, mark as `null` (marker not found).
+
+**Numbers involved:**
+- The search window is an 80×80 pixel square (since margin=40 on each side).
+- Darkness threshold = 80 (pixels with red value 0–79 are dark).
+- Minimum dark pixels = 15.
+
+**Result:**
+- A list of up to 3 detected marker positions (some may be `null`).
+
+---
+
+## 8. Building the Refined Homography
+
+**Flow:** The app combines the QR corners and any detected markers into a single correspondence set and recomputes the homography.
+
+**Key file:** `CardDetector.kt` – `buildRefinedHomography(templatePoints, imagePoints)`
+
+**What happens:**
+- The template points list is extended: start with the 4 QR corners, then add any detected marker reference positions.
+- The image points list is extended: start with the 4 QR image corners, then add the detected marker image positions.
+- The function is called again with the larger set.
+- With more points, OpenCV computes a least‑squares homography that distributes error across all correspondences.
+
+**Numbers involved:**
+- If all 3 markers are found: 7 point pairs → higher accuracy.
+- If 0 markers found: 4 point pairs → fallback to QR‑only (lower accuracy for bubbles far from QR).
+
+---
+
+## 9. Projecting Bubble Positions
+
+**Flow:** Using the refined homography, the app maps each bubble position from template space to image space.
+
+**Key file:** `ScannerScreen.kt` – inside the analyzer success listener.
+
+**What happens:**
+- `template.bubblePositions` is a list of `PointF` in 0.1 mm units.
+- For each position `(tx, ty)`, the homography maps it to a pixel coordinate `(ix, iy)` in the full‑resolution image.
+- This gives a list of `finalBubbles` – pixel coordinates for every bubble.
+
+**Numbers involved:**
+- Candidate: 12 positions.
+- Agenda: 12 positions.
+- The mapping uses the refined homography matrix.
+
+---
+
+## 10. Live Classification (For Overlay)
+
+**Flow:** Before final capture, the app samples bubble darkness in the full‑resolution image and classifies them for the live overlay.
+
+**Key file:** `BubbleAnalyzer.kt` – `sampleDarkness()` and `classifyByGroup()`
+
+**Sampling:**
+- `sampleDarkness(bitmap, positions, radiusPx = 15)` reads a 31×31 pixel window around each bubble.
+- It returns a `FloatArray` of average darkness values (0 = white, 255 = black).
+
+**Classification:**
+- `classifyByGroup(darkness, groups, zThreshold = 1.3)`:
+  - For each group (e.g., `[0..11]` for Candidate, or `[0..2]`, `[3..5]`, etc. for Agenda):
+    - Compute the mean and standard deviation of darkness within that group.
+    - For each bubble in the group, compute a z‑score: `(darkness - mean) / stdDev`.
+    - If z‑score > 1.3, mark as **filled** (green).
+    - Otherwise, mark as **empty** (blue).
+- This drives the visual overlay in real time.
+
+**Numbers involved:**
+- `radiusPx = 15` – sample window size.
+- `zThreshold = 1.3` – sensitivity threshold.
+- Groups are defined in the template (`CANDIDATE_GROUPS` = `[0..11]`, `AGENDA_GROUPS` = `[0..2, 3..5, 6..8, 9..11]`).
+
+---
+
+## 11. Stability Check and Auto‑Capture
+
+**Flow:** The app tracks motion of the card corners over consecutive frames.
+
+**Key file:** `ScannerScreen.kt` – stability logic inside the analyzer.
+
+**Parameters:**
+- `MOTION_EPSILON_PX = 6` – maximum pixel movement allowed to consider the card "stable".
+- `STABLE_FRAMES_REQUIRED = 4` – number of consecutive stable frames before auto‑capture.
+
+**How it works:**
+- Each frame, the card corners (`finalCardCorners`) are compared to the previous frame (`lastStableCorners`).
+- The Manhattan distance of each corner is computed.
+- If any corner moved more than 6 pixels, stability resets.
+- If all corners stayed within 6 pixels for 4 consecutive frames, auto‑capture is triggered.
+
+**Numbers involved:**
+- 6 pixels = motion threshold.
+- 4 frames = stability requirement (at ~30 fps, this is about 133 ms of stability).
+
+---
+
+## 12. Final Capture (OMRExtractor)
+
+**Flow:** When auto‑capture fires (or user taps "Capture & Verify"), the app takes the last 3–5 full‑resolution frames, averages them, and runs the accurate OMR pipeline.
+
+**Key file:** `OMRExtractor.kt` – `extractMarksWithConfidence(bitmap, qrCorners, template)`
+
+**Step 12a – Frame Averaging**
+- `BubbleAnalyzer.averageBitmaps(frameQueue)` averages the red channel of all queued bitmaps.
+- This reduces noise from camera sensor and lighting fluctuations.
+
+**Step 12b – Preprocessing**
+- `ImagePreprocessor.enhanceContrast(bitmap)` – histogram equalisation.
+- `ImagePreprocessor.denoise(bitmap)` – 3×3 median filter.
+- `ImagePreprocessor.normalize(bitmap)` – stretches pixel values to full 0–255 range.
+
+**Step 12c – Perspective Correction (Warping)**
+- The app warps the preprocessed bitmap to the canonical template size (850×540).
+- This uses `warpPerspective()` which applies a perspective transform based **only on the QR corners** (not the refined homography, because `OMRExtractor` wants a consistent reference).
+- The warped image is a straight, top‑down view of the card.
+
+**Step 12d – Bubble Sampling (Weighted Circular)**
+- For each bubble position in the template (in the warped image coordinates), the app samples a circular region.
+- `sampleBubbleWeighted(warped, cx, cy, radius = 20)`:
+  - For each pixel within `radius` pixels of the centre, calculate its distance `dist`.
+  - Weight = `1 - (dist / radius)` (linear falloff – centre has highest weight).
+  - Sum `weight * pixel_gray` and accumulate total weight.
+  - Return weighted average intensity.
+
+**Step 12e – Otsu Thresholding**
+- All bubble intensities are collected into an array.
+- `ImagePreprocessor.otsuThreshold(intensities)` computes the optimal global threshold that separates "dark" (filled) from "light" (empty).
+- Otsu's method minimises intra‑class variance.
+- The threshold is a value between 0 and 255.
+
+**Step 12f – Determine Filled Bubbles**
+- For each bubble, if its intensity < Otsu threshold, it is considered filled.
+- This produces a list of filled indices (e.g., `[0, 5, 9]`).
+
+**Step 12g – Confidence Calculation**
+- `ImagePreprocessor.adaptiveThresholdWithConfidence(intensities)`:
+  - Computes the separation between the mean of intensities above the threshold and below the threshold.
+  - Confidence = (separation / 255) (clamped to 0–1).
+- Additionally, the app counts how many bubbles have intensities very close to the threshold (within 15% margin). Each such borderline bubble reduces confidence by 5%.
+- Final confidence = `base_confidence * (1 - 0.05 * borderline_count)`.
+
+**Numbers involved:**
+- `BUBBLE_RADIUS = 20` – sampling radius in warped image pixels.
+- Warped image size = `850 × 540` pixels.
+- Otsu threshold is dynamic per scan.
+- Confidence is a float between 0 and 1.
+
+---
+
+## 13. Result Display
+
+**Flow:** The `LocalScanResult` object is created and passed to the UI.
+
+**Key file:** `ScannerScreen.kt` – `AlertDialog` inside `scanResult?.let { ... }`
+
+**Fields displayed:**
+- `token` – the QR text (e.g., `"VXK8P2M47QFN"`).
+- `filledIndices` – list of indices (e.g., `[0, 5, 9]`).
+- `confidence` – percentage (e.g., `0.92` → displayed as `92%`).
+- `scanDataJson` – a JSON string representation.
+
+**User actions:**
+- Tap **OK** → dismiss and continue scanning.
+- Tap **Rescan** → dismiss and try again.
+- Tap **Cancel** → dismiss.
+
+---
+
+## Summary Table: Key Numbers and Their Locations
+
+| Number / Parameter | Value / Default | Location in Code | Purpose |
+|--------------------|-----------------|------------------|---------|
+| Card width | 850 units (85 mm) | `CardTemplate.REF_WIDTH` | Template size |
+| Card height | 540 units (54 mm) | `CardTemplate.REF_HEIGHT` | Template size |
+| QR corners (TL, TR, BR, BL) | `(660,30), (820,30), (820,210), (660,210)` | `CardTemplate.SHARED_QR_CORNERS` | QR area in template |
+| Marker centres (TL, BR, BL) | `(25,25), (825,515), (25,515)` | `CardTemplate.SHARED_MARKER_CORNERS` | Reference markers |
+| Candidate bubble positions | 12 points | `CardTemplate.CANDIDATE.bubblePositions` | Bubble locations |
+| Agenda bubble positions | 12 points | `CardTemplate.AGENDA.bubblePositions` | Bubble locations |
+| Candidate groups | `[0..11]` | `CardTemplate.CANDIDATE_GROUPS` | Single race |
+| Agenda groups | `[0..2], [3..5], [6..8], [9..11]` | `CardTemplate.AGENDA_GROUPS` | Four independent rows |
+| Camera resolution | 1280×720 | `ScannerScreen.startCamera()` | Capture resolution |
+| Downsample size | 800×450 | `ScannerScreen.downsampleBitmap()` | Fast edge detection |
+| Marker search margin | 40 px | `CardDetector.MARKER_SEARCH_MARGIN_PX` | Window size for marker search |
+| Marker darkness threshold | 80 | `CardDetector.MARKER_DARKNESS_THRESHOLD` | Dark pixel cutoff |
+| Marker min dark pixels | 15 | `CardDetector.MARKER_MIN_DARK_PIXELS` | Minimum accepted marker size |
+| Bubble sample radius (live) | 15 px | `BubbleAnalyzer.sampleDarkness()` | Overlay classification |
+| Bubble z‑score threshold | 1.3 | `BubbleAnalyzer.classifyByGroup()` | Overlay sensitivity |
+| Bubble sample radius (final) | 20 px | `OMRExtractor.BUBBLE_RADIUS` | Accurate OMR sampling |
+| Motion epsilon | 6 px | `ScannerScreen.MOTION_EPSILON_PX` | Stability threshold |
+| Stable frames required | 4 | `ScannerScreen.STABLE_FRAMES_REQUIRED` | Auto‑capture delay |
+| Frame queue size | 5 | `ScannerScreen.MAX_QUEUE` | Averaging buffer |
+| Otsu threshold | Dynamic | `ImagePreprocessor.otsuThreshold()` | Global dark/light split |
+| Borderline margin | 15% of threshold | `OMRExtractor.extractMarksWithConfidence()` | Confidence adjustment |
+
+---
+
+## Visual Data Flow Diagram (Text Representation)
+
+```
+[Printed Card]
+     │
+     │ (physical)
+     ▼
+[Camera Preview] ──────────────────────────────────────────────┐
+     │                                                         │
+     │ (every frame)                                           │
+     ▼                                                         │
+[ImageAnalysis]                                                │
+     │                                                         │
+     ├───► [Downsample (800×450)] ──► [CardDetector.detectCardCorners()] ──► [Card Outline Overlay]
+     │
+     ├───► [Full‑res Bitmap] ──► [ML Kit QR Scan] ──► [qrValue + qrCorners]
+     │                              │
+     │                              ▼
+     │                         [Templates.fromPrefix()] ──► [template]
+     │                              │
+     │                              ▼
+     │                         [buildRefinedHomography(qrRefCorners, qrCorners)] ──► [qr‑only homography]
+     │                              │
+     │                              ▼
+     │                         [predictImagePoints(markerRefPositions)] ──► [predicted marker positions]
+     │                              │
+     │                              ▼
+     │                         [detectRefMarkersNearPredicted()] ──► [detected markers (0–3)]
+     │                              │
+     │                              ▼
+     │                         [buildRefinedHomography(qr + markers)] ──► [refined homography]
+     │                              │
+     │                              ▼
+     │                         [project bubble positions] ──► [bubble image coordinates]
+     │                              │
+     │                              ▼
+     │                         [BubbleAnalyzer.sampleDarkness()] ──► [darkness array]
+     │                              │
+     │                              ▼
+     │                         [BubbleAnalyzer.classifyByGroup()] ──► [bubble statuses] ──► [Live Overlay]
+     │
+     ├───► [Stability Check] ──► (if stable for 4 frames) ──► [Auto‑Capture Trigger]
+     │
+     └───► (Manual Capture Button) ──────────────────────────────────┘
+                                                                   │
+                                                                   ▼
+                                                        [Frame Averaging (last 3–5 frames)]
+                                                                   │
+                                                                   ▼
+                                                        [OMRExtractor.extractMarksWithConfidence()]
+                                                                   │
+                                                  ┌────────────────┼────────────────┐
+                                                  ▼                ▼                ▼
+                                           [Preprocess]      [Warp to 850×540]  [Weighted Sampling]
+                                                                   │
+                                                                   ▼
+                                                        [Otsu Thresholding]
+                                                                   │
+                                                                   ▼
+                                                        [Filled Indices + Confidence]
+                                                                   │
+                                                                   ▼
+                                                        [Result Dialog (Token, Indices, Confidence, JSON)]
+```
+
+---
+
+This flow diagram and the accompanying numbers table give a complete, end‑to‑end understanding of every step, every parameter, and every file involved in the scanning process. It is designed to help contributors, testers, and curious users see exactly how OpenScanVision works under the hood.
