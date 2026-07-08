@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NIB Premium Voter Card</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- QRCode library from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <!-- ===== CANDIDATE CARD ===== -->
+  <div class="voter-card" id="cardCandidate">
+    <div class="card-header">
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 108 108">
+          <path d="M18 74C30 52 36 38 45 38C54 38 58 64 66 64C74 64 80 50 90 38L90 18L18 18Z" fill="#A06333" />
+          <path d="M18 84C30 62 36 48 45 48C54 48 58 74 66 74C74 74 80 60 90 48L90 90L18 90Z" fill="#c9a237" />
+        </svg>
+        <span class="brand-name">NIB<span>Vote</span></span>
+      </div>
+      <span class="badge">Candidate</span>
+    </div>
+
+    <div class="election-title">
+      <strong>2026 Member Election</strong> · Board of Directors
+    </div>
+
+    <!-- Main QR -->
+    <div class="qr-wrapper" id="qrCandidate">
+      <div class="qr-label">Scan</div>
+    </div>
+
+    <!-- Reference markers (dark squares) -->
+    <div class="ref-marker ref-marker-tl">TL</div>
+    <div class="ref-marker ref-marker-br">BR</div>
+    <div class="ref-marker ref-marker-bl">BL</div>
+
+    <div class="voter-row">
+      <div class="voter-info">
+        <div class="voter-name">Abebech Demissie</div>
+        <div class="voter-details">
+          <span class="label">Serial</span>
+          <span class="value">VOTER001</span>
+          <span class="separator">◆</span>
+          <span class="label">Shares</span>
+          <span class="value">34,234</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="omr-section">
+      <div class="omr-grid">
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">01</span><span class="candidate-name">Dr. Sintayehu W.</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">02</span><span class="candidate-name">Amanuel Gebre</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">03</span><span class="candidate-name">Tigist Hailu</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">04</span><span class="candidate-name">Michael Chen</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">05</span><span class="candidate-name">Liil Taye</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">06</span><span class="candidate-name">Abdurahman J.</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">07</span><span class="candidate-name">Selamawit Hailu</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">08</span><span class="candidate-name">Yonas Tekle</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">09</span><span class="candidate-name">Mulugeta W.</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">10</span><span class="candidate-name">Hirut Alemu</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">11</span><span class="candidate-name">Bekele Girma</span></div>
+        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">12</span><span class="candidate-name">Eyerusalem K.</span></div>
+      </div>
+    </div>
+
+    <div class="card-footer">
+      <span class="footer-text">Mark <strong>one</strong> choice</span>
+      <span class="footer-text">Authorized · NIB ES</span>
+    </div>
+  </div>
+
+  <!-- ===== AGENDA CARD ===== -->
+  <div class="voter-card" id="cardAgenda">
+    <div class="card-header">
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 108 108">
+          <path d="M18 74C30 52 36 38 45 38C54 38 58 64 66 64C74 74 80 50 90 38L90 18L18 18Z" fill="#A06333" />
+          <path d="M18 84C30 62 36 48 45 48C54 48 58 74 66 74C74 74 80 60 90 48L90 90L18 90Z" fill="#c9a237" />
+        </svg>
+        <span class="brand-name">NIB<span>Vote</span></span>
+      </div>
+      <span class="badge">Agenda</span>
+    </div>
+
+    <div class="election-title">
+      <strong>2026 Agenda Voting</strong> · Shareholder Resolutions
+    </div>
+
+    <div class="qr-wrapper" id="qrAgenda">
+      <div class="qr-label">Scan</div>
+    </div>
+
+    <div class="ref-marker ref-marker-tl">TL</div>
+    <div class="ref-marker ref-marker-br">BR</div>
+    <div class="ref-marker ref-marker-bl">BL</div>
+
+    <div class="voter-row">
+      <div class="voter-info">
+        <div class="voter-name">Abebech Demissie</div>
+        <div class="voter-details">
+          <span class="label">Serial</span>
+          <span class="value">VOTER001</span>
+          <span class="separator">◆</span>
+          <span class="label">Shares</span>
+          <span class="value">34,234</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="omr-section">
+      <div class="omr-grid agenda-grid">
+        <span class="agenda-label">Financial Report</span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+
+        <span class="agenda-label">Board Rules</span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+
+        <span class="agenda-label">Dividend Policy</span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+
+        <span class="agenda-label">CEO Appointment</span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
+        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+      </div>
+    </div>
+
+    <div class="card-footer">
+      <span class="footer-text">Mark <strong>one</strong> per resolution</span>
+      <span class="footer-text">Authorized · NIB ES</span>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
