@@ -1,4 +1,4 @@
-// ScannerScreen.kt — QR + 4‑corner marker localisation, no bubbles
+// ScannerScreen.kt – Full code with 4‑marker card outline
 package org.openscanvision.ui.screens
 
 import android.Manifest
@@ -159,6 +159,7 @@ fun ScannerScreen() {
                             var markerScreenMap: Map<String, Offset>? = null
                             var template: CardTemplate? = null
 
+                            // OpenCV fallback
                             if (cardCorners != null && cardCorners.size == 4) {
                                 val scaleX = imageWidth / processWidth
                                 val scaleY = imageHeight / processHeight
@@ -177,9 +178,7 @@ fun ScannerScreen() {
                                     if (qrOnlyHomography != null) {
                                         val markerRefs = template.markerRefPositions
                                         if (!markerRefs.isNullOrEmpty()) {
-                                            // Predict where the corner squares should be
                                             val predicted = CardDetector.predictImagePoints(markerRefs, qrOnlyHomography)
-                                            // Search for dark squares near those predictions
                                             val detected = CardDetector.detectRefMarkersNearPredicted(bitmap, predicted)
 
                                             val markerLabels = listOf("TL", "TR", "BR", "BL")
@@ -194,6 +193,11 @@ fun ScannerScreen() {
                                                 )
                                                 if (markerScreenPoints != null) {
                                                     markerScreenMap = detectedMap.keys.zip(markerScreenPoints).toMap()
+                                                }
+
+                                                // 🔥 Use markers as card corners when all 4 found
+                                                if (detectedMap.size == 4) {
+                                                    finalCardCorners = markerImagePoints
                                                 }
                                             }
                                         }
@@ -371,7 +375,7 @@ fun ScannerScreen() {
                 LiveCardOverlay(
                     cardCorners = smoothCorners,
                     qrCorners = smoothQRCorners,
-                    markerCenters = smoothMarkerMap,   // ← pass the found markers
+                    markerCenters = smoothMarkerMap,   // ← markers overlay
                     bubblePositions = null,
                     bubbleStatus = null,
                     isTracking = isTracking,
