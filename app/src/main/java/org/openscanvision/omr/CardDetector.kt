@@ -1,4 +1,3 @@
-// CardDetector.kt
 package org.openscanvision.omr
 
 import android.graphics.Bitmap
@@ -16,9 +15,10 @@ object CardDetector {
     private const val MAX_AREA_RATIO = 0.85
     private const val EPSILON_FACTOR = 0.02
 
-    private const val MARKER_SEARCH_MARGIN_PX = 40
-    private const val MARKER_DARKNESS_THRESHOLD = 80
-    private const val MARKER_MIN_DARK_PIXELS = 15
+    // Tuned marker detection
+    private const val MARKER_SEARCH_MARGIN_PX = 60        // was 40
+    private const val MARKER_DARKNESS_THRESHOLD = 70      // was 80
+    private const val MARKER_MIN_DARK_PIXELS = 20         // was 15
 
     fun detectCardCorners(bitmap: Bitmap): List<PointF>? {
         val src = Mat()
