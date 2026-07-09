@@ -1,3 +1,4 @@
+// CardDetector.kt
 package org.openscanvision.omr
 
 import android.graphics.Bitmap

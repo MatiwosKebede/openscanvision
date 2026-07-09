@@ -1,4 +1,4 @@
-// ScannerScreen.kt
+// ScannerScreen.kt — QR + 4‑corner marker localisation, no bubbles
 package org.openscanvision.ui.screens
 
 import android.Manifest
@@ -35,7 +35,9 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.*
 import org.openscanvision.model.LocalScanResult
-import org.openscanvision.omr.*
+import org.openscanvision.omr.CardDetector
+import org.openscanvision.omr.CardTemplate
+import org.openscanvision.omr.Templates
 import org.openscanvision.ui.components.*
 import org.openscanvision.ui.utils.*
 import java.util.concurrent.Executors
@@ -74,18 +76,11 @@ fun ScannerScreen() {
     var rawQRCorners by remember { mutableStateOf<List<Offset>?>(null) }
     var rawMarkerCenters by remember { mutableStateOf<Map<String, Offset>?>(null) }
     var qrDetected by remember { mutableStateOf(false) }
-    var rawBubblePositions by remember { mutableStateOf<List<Offset>?>(null) }
-    var rawBubbleStatus by remember { mutableStateOf<List<Boolean>?>(null) }
     var isTracking by remember { mutableStateOf(false) }
 
     var latestToken by remember { mutableStateOf<String?>(null) }
-    var latestBubbleGroups by remember { mutableStateOf<List<IntRange>?>(null) }
-    var latestConfidence by remember { mutableStateOf(1f) }
 
     var isProcessing by remember { mutableStateOf(false) }
-    val frameQueue = remember { mutableListOf<Bitmap>() }
-    val MAX_QUEUE = 5
-
     val previewView = remember { PreviewView(context) }
     var cameraError by remember { mutableStateOf<String?>(null) }
 
@@ -101,7 +96,6 @@ fun ScannerScreen() {
             null
         }
     }
-    val smoothBubbles = rememberSmoothCorners(rawBubblePositions, smoothing = 0.3f)
 
     // ─── Camera executor and scanner ──────────────────────────────
     val barcodeScanner = remember { BarcodeScanning.getClient() }
@@ -162,11 +156,8 @@ fun ScannerScreen() {
 
                             var finalCardCorners: List<Offset>? = null
                             var finalQRCorners: List<Offset>? = null
-                            var finalBubbles: List<PointF>? = null
-                            var template: CardTemplate? = null
                             var markerScreenMap: Map<String, Offset>? = null
-                            var groups: List<IntRange>? = null
-                            var statuses: List<Boolean>? = null
+                            var template: CardTemplate? = null
 
                             if (cardCorners != null && cardCorners.size == 4) {
                                 val scaleX = imageWidth / processWidth
@@ -178,55 +169,39 @@ fun ScannerScreen() {
                                 finalQRCorners = qrImagePoints.map { Offset(it.x, it.y) }
                                 template = Templates.fromPrefix(qrValue)
 
+                                // ─── 4‑square marker localisation ───
                                 if (template != null) {
                                     val qrOnlyHomography = CardDetector.buildRefinedHomography(
                                         template.qrRefCorners, qrImagePoints
                                     )
                                     if (qrOnlyHomography != null) {
-                                        val templatePts = template.qrRefCorners.toMutableList()
-                                        val imagePts = qrImagePoints.toMutableList()
-
                                         val markerRefs = template.markerRefPositions
                                         if (!markerRefs.isNullOrEmpty()) {
+                                            // Predict where the corner squares should be
                                             val predicted = CardDetector.predictImagePoints(markerRefs, qrOnlyHomography)
+                                            // Search for dark squares near those predictions
                                             val detected = CardDetector.detectRefMarkersNearPredicted(bitmap, predicted)
-                                            val markerLabels = listOf("TL", "BR", "BL")
+
+                                            val markerLabels = listOf("TL", "TR", "BR", "BL")
                                             val detectedMap = detected.mapIndexedNotNull { i, pt ->
                                                 if (pt != null) markerLabels[i] to Offset(pt.x, pt.y) else null
                                             }.toMap()
+
                                             if (detectedMap.isNotEmpty()) {
                                                 val markerImagePoints = detectedMap.values.toList()
-                                                val markerScreenPoints = mapImageToScreen(markerImagePoints, imageWidth, imageHeight, previewView)
+                                                val markerScreenPoints = mapImageToScreen(
+                                                    markerImagePoints, imageWidth, imageHeight, previewView
+                                                )
                                                 if (markerScreenPoints != null) {
                                                     markerScreenMap = detectedMap.keys.zip(markerScreenPoints).toMap()
                                                 }
                                             }
-                                            detected.forEachIndexed { i, pt ->
-                                                if (pt != null) {
-                                                    templatePts.add(markerRefs[i])
-                                                    imagePts.add(pt)
-                                                }
-                                            }
-                                        }
-
-                                        val refined = CardDetector.buildRefinedHomography(templatePts, imagePts)
-                                            ?: qrOnlyHomography
-
-                                        val srcFloats = FloatArray(template.bubblePositions.size * 2)
-                                        template.bubblePositions.forEachIndexed { i, p ->
-                                            srcFloats[i * 2] = p.x
-                                            srcFloats[i * 2 + 1] = p.y
-                                        }
-                                        val dstFloats = srcFloats.copyOf()
-                                        refined.mapPoints(dstFloats)
-                                        finalBubbles = template.bubblePositions.indices.map {
-                                            PointF(dstFloats[it * 2], dstFloats[it * 2 + 1])
                                         }
                                     }
                                 }
                             }
 
-                            // Persistence
+                            // Persist card corners
                             if (finalCardCorners == null) {
                                 lostCount++
                                 finalCardCorners = if (lostCount <= maxLostFrames) lastKnownCorners else null
@@ -249,50 +224,21 @@ fun ScannerScreen() {
                                 coroutineScope.launch(Dispatchers.Main) { rawQRCorners = null }
                             }
 
-                            var groupsForConfidence: List<IntRange>? = null
-
                             if (finalCardCorners != null) {
                                 val screenCorners = mapImageToScreen(finalCardCorners, imageWidth, imageHeight, previewView)
                                 coroutineScope.launch(Dispatchers.Main) {
                                     rawCardCorners = screenCorners
                                     isTracking = true
                                 }
-
-                                if (finalBubbles != null && template != null) {
-                                    val darkness = BubbleAnalyzer.sampleDarkness(bitmap, finalBubbles!!, radiusPx = 15)
-                                    val groupsTmp = template!!.bubbleGroups
-                                        ?: listOf(finalBubbles!!.indices.first..finalBubbles!!.indices.last)
-                                    groupsForConfidence = groupsTmp
-                                    statuses = BubbleAnalyzer.classifyByGroup(darkness, groupsTmp).toList()
-                                    groups = groupsTmp
-
-                                    val screenBubbles = mapImageToScreen(
-                                        finalBubbles!!.map { Offset(it.x, it.y) }, imageWidth, imageHeight, previewView
-                                    )
-                                    coroutineScope.launch(Dispatchers.Main) {
-                                        rawBubblePositions = screenBubbles
-                                        rawBubbleStatus = statuses
-                                        latestToken = qrValue
-                                        latestBubbleGroups = groupsTmp
-                                        latestConfidence = BubbleAnalyzer.computeConfidence(statuses!!.toBooleanArray(), groupsTmp)
-                                    }
-                                } else {
-                                    coroutineScope.launch(Dispatchers.Main) {
-                                        rawBubblePositions = null
-                                        rawBubbleStatus = null
-                                    }
-                                }
                             } else {
                                 coroutineScope.launch(Dispatchers.Main) {
                                     isTracking = false
                                     rawCardCorners = null
-                                    rawBubblePositions = null
-                                    rawBubbleStatus = null
                                 }
                             }
 
-                            // ─── Auto‑capture ──────────────────────
-                            if (finalCardCorners != null && finalBubbles != null && template != null && !autoCaptureTriggered) {
+                            // ─── Auto‑capture when stable ───────
+                            if (finalCardCorners != null && qrValue != null && !autoCaptureTriggered) {
                                 val baseline = lastStableCorners
                                 val moved = baseline == null || baseline.size != finalCardCorners.size ||
                                         finalCardCorners.indices.any { i ->
@@ -309,36 +255,26 @@ fun ScannerScreen() {
                                 if (stableFrameCount >= STABLE_FRAMES_REQUIRED) {
                                     autoCaptureTriggered = true
                                     val capturedToken = qrValue
-                                    val capturedStatuses = statuses
-                                    val capturedGroups = groupsForConfidence
                                     coroutineScope.launch(Dispatchers.Main) {
                                         isScanning = true
                                         scanStatus = "Auto‑capturing..."
                                         isProcessing = true
                                         delay(200)
-                                        val averaged = if (frameQueue.size >= 3) BubbleAnalyzer.averageBitmaps(frameQueue) else frameQueue.lastOrNull()
-                                        if (averaged == null || capturedToken == null || capturedStatuses == null || capturedGroups == null) {
-                                            isScanning = false
-                                            isProcessing = false
-                                            scanStatus = "No frames available"
-                                            autoCaptureTriggered = false
-                                            return@launch
-                                        }
-                                        val (filledIndices, confidence) = OMRExtractor.extractMarksWithConfidence(
-                                            averaged,
-                                            qrImagePoints ?: return@launch,
-                                            template
-                                        )
+
                                         scanResult = LocalScanResult(
                                             token = capturedToken,
-                                            filledIndices = filledIndices,
-                                            scanDataJson = Gson().toJson(mapOf("filledIndices" to filledIndices)),
-                                            confidence = confidence
+                                            filledIndices = emptyList(),
+                                            scanDataJson = Gson().toJson(
+                                                mapOf(
+                                                    "qrCode" to capturedToken,
+                                                    "markersFound" to (markerScreenMap?.size ?: 0)
+                                                )
+                                            ),
+                                            confidence = 1.0f
                                         )
                                         isScanning = false
                                         isProcessing = false
                                         scanStatus = "✅ Auto‑captured"
-                                        frameQueue.clear()
                                         autoCaptureTriggered = false
                                     }
                                 }
@@ -348,8 +284,6 @@ fun ScannerScreen() {
                                 autoCaptureTriggered = false
                             }
 
-                            frameQueue.add(bitmap)
-                            if (frameQueue.size > MAX_QUEUE) frameQueue.removeAt(0)
                             downsampled.recycle()
                             imageProxy.close()
                         }
@@ -364,8 +298,7 @@ fun ScannerScreen() {
                                     isTracking = true
                                     rawQRCorners = null
                                     qrDetected = false
-                                    rawBubblePositions = null
-                                    rawBubbleStatus = null
+                                    rawMarkerCenters = null
                                     stableFrameCount = 0
                                     lastStableCorners = null
                                     autoCaptureTriggered = false
@@ -375,15 +308,13 @@ fun ScannerScreen() {
                                     isTracking = false
                                     rawCardCorners = null
                                     rawQRCorners = null
-                                    rawBubblePositions = null
-                                    rawBubbleStatus = null
+                                    rawMarkerCenters = null
+                                    qrDetected = false
                                     stableFrameCount = 0
                                     lastStableCorners = null
                                     autoCaptureTriggered = false
                                 }
                             }
-                            frameQueue.add(bitmap)
-                            if (frameQueue.size > MAX_QUEUE) frameQueue.removeAt(0)
                             downsampled.recycle()
                             imageProxy.close()
                         }
@@ -440,9 +371,9 @@ fun ScannerScreen() {
                 LiveCardOverlay(
                     cardCorners = smoothCorners,
                     qrCorners = smoothQRCorners,
-                    markerCenters = smoothMarkerMap,
-                    bubblePositions = smoothBubbles,
-                    bubbleStatus = rawBubbleStatus,
+                    markerCenters = smoothMarkerMap,   // ← pass the found markers
+                    bubblePositions = null,
+                    bubbleStatus = null,
                     isTracking = isTracking,
                     qrDetected = qrDetected,
                     scaleFactor = 1.08f
@@ -452,13 +383,12 @@ fun ScannerScreen() {
                 }
             }
 
-            // ─── Status text ─────────────────────────────────────────
+            // Status text
             val statusText = buildString {
                 if (isTracking) append("✅ Card detected") else append("❌ Card not detected")
-                if (qrDetected) append(" | QR ✓")
-                else append(" | QR ✗")
-                if (rawMarkerCenters != null) append(" | Markers ✓")
-                else append(" | Markers ✗")
+                if (qrDetected) append(" | QR ✓") else append(" | QR ✗")
+                if (rawMarkerCenters != null) append(" | Markers ${rawMarkerCenters!!.size}/4")
+                else append(" | Markers 0/4")
             }
             Text(
                 text = statusText,
@@ -512,60 +442,29 @@ fun ScannerScreen() {
 
                 Button(
                     onClick = {
-                        isScanning = true
-                        scanStatus = "Capturing frames..."
-                        isProcessing = true
-                        coroutineScope.launch(Dispatchers.Default) {
-                            delay(300)
-                            val token = latestToken
-                            val statuses = rawBubbleStatus
-                            val groups = latestBubbleGroups
-
-                            if (frameQueue.isEmpty() || token == null || statuses == null || groups == null) {
-                                withContext(Dispatchers.Main) {
-                                    isScanning = false
-                                    isProcessing = false
-                                    scanStatus = "Card not detected — hold steady and try again"
-                                }
-                                return@launch
-                            }
-
-                            val averaged = if (frameQueue.size >= 3) BubbleAnalyzer.averageBitmaps(frameQueue) else frameQueue.lastOrNull()
-                            if (averaged == null) {
-                                withContext(Dispatchers.Main) {
-                                    isScanning = false
-                                    isProcessing = false
-                                    scanStatus = "No frame"
-                                }
-                                return@launch
-                            }
-                            val qrCorners = rawQRCorners?.map { PointF(it.x, it.y) }
-                            val template = latestToken?.let { Templates.fromPrefix(it) }
-                            if (qrCorners != null && template != null) {
-                                val (filledIndices, confidence) = OMRExtractor.extractMarksWithConfidence(
-                                    averaged,
-                                    qrCorners,
-                                    template
+                        if (latestToken != null) {
+                            isScanning = true
+                            scanStatus = "Capturing..."
+                            isProcessing = true
+                            coroutineScope.launch(Dispatchers.Main) {
+                                delay(300)
+                                scanResult = LocalScanResult(
+                                    token = latestToken!!,
+                                    filledIndices = emptyList(),
+                                    scanDataJson = Gson().toJson(
+                                        mapOf(
+                                            "qrCode" to latestToken!!,
+                                            "markersFound" to (rawMarkerCenters?.size ?: 0)
+                                        )
+                                    ),
+                                    confidence = 1.0f
                                 )
-                                withContext(Dispatchers.Main) {
-                                    scanResult = LocalScanResult(
-                                        token = token,
-                                        filledIndices = filledIndices,
-                                        scanDataJson = Gson().toJson(mapOf("filledIndices" to filledIndices)),
-                                        confidence = confidence
-                                    )
-                                    isScanning = false
-                                    isProcessing = false
-                                    scanStatus = "✅ Scan complete"
-                                    frameQueue.clear()
-                                }
-                            } else {
-                                withContext(Dispatchers.Main) {
-                                    isScanning = false
-                                    isProcessing = false
-                                    scanStatus = "QR not detected"
-                                }
+                                isScanning = false
+                                isProcessing = false
+                                scanStatus = "✅ Captured"
                             }
+                        } else {
+                            scanStatus = "No QR code detected"
                         }
                     },
                     modifier = Modifier.fillMaxWidth(0.7f),
@@ -582,41 +481,6 @@ fun ScannerScreen() {
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("Token: ${result.token}", fontWeight = FontWeight.Bold)
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Confidence: ", fontWeight = FontWeight.Medium)
-                                LinearProgressIndicator(
-                                    progress = result.confidence,
-                                    modifier = Modifier.weight(1f).height(8.dp).padding(horizontal = 8.dp),
-                                    color = when {
-                                        result.confidence > 0.8f -> Color(0xFF10B981)
-                                        result.confidence > 0.5f -> Color(0xFFF59E0B)
-                                        else -> Color(0xFFEF4444)
-                                    },
-                                    trackColor = Color.Gray.copy(alpha = 0.3f)
-                                )
-                                Text(
-                                    text = "${String.format("%.0f", result.confidence * 100)}%",
-                                    fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                                    color = when {
-                                        result.confidence > 0.8f -> Color(0xFF10B981)
-                                        result.confidence > 0.5f -> Color(0xFFF59E0B)
-                                        else -> Color(0xFFEF4444)
-                                    }
-                                )
-                            }
-                            Text(
-                                text = when {
-                                    result.confidence > 0.8f -> "High confidence — reliable result."
-                                    result.confidence > 0.5f -> "Medium confidence — consider rescanning."
-                                    else -> "Low confidence — please rescan the card."
-                                },
-                                fontSize = 13.sp,
-                                color = when {
-                                    result.confidence > 0.8f -> Color(0xFF10B981)
-                                    result.confidence > 0.5f -> Color(0xFFF59E0B)
-                                    else -> Color(0xFFEF4444)
-                                }
-                            )
                             Divider()
                             Text("Data:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text(
@@ -627,7 +491,7 @@ fun ScannerScreen() {
                             )
                         }
                     },
-                    confirmButton = { Button(onClick = { scanResult = null; isScanning = false }) { Text(if (result.confidence > 0.5f) "OK" else "Rescan") } },
+                    confirmButton = { Button(onClick = { scanResult = null; isScanning = false }) { Text("OK") } },
                     dismissButton = { TextButton(onClick = { scanResult = null; isScanning = false }) { Text("Cancel") } }
                 )
             }
@@ -635,7 +499,6 @@ fun ScannerScreen() {
     }
 }
 
-// ─── Coroutine Helper ──────────────────────────────────────────────
 private suspend fun <T> Task<T>.await(): T {
     return suspendCancellableCoroutine { continuation ->
         addOnSuccessListener { result: T -> continuation.resume(result) }

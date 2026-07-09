@@ -26,7 +26,7 @@ object OMRExtractor {
         processed = ImagePreprocessor.denoise(processed)
         processed = ImagePreprocessor.normalize(processed)
 
-        // 2. Perspective correction
+        // 2. Perspective correction (Initial alignment via QR)
         val refWidth = Templates.REF_WIDTH
         val refHeight = Templates.REF_HEIGHT
         val warped = warpPerspective(processed, qrCorners, template, refWidth, refHeight)
@@ -35,24 +35,60 @@ object OMRExtractor {
             return Pair(emptyList(), 0f)
         }
 
-        // 3. Extract bubble intensities
+        // 3. Localize the 4 square reference marks on the warped image for micro-precision refinement
+        val theoreticalMarkers = template.markerRefPositions ?: Templates.SHARED_MARKER_CORNERS
+        val detectedMarkers = CardDetector.detectRefMarkersNearPredicted(warped, theoreticalMarkers)
+
+        val validTemplatePoints = mutableListOf<PointF>()
+        val validImagePoints = mutableListOf<PointF>()
+
+        for (i in theoreticalMarkers.indices) {
+            val det = detectedMarkers.getOrNull(i)
+            if (det != null) {
+                validTemplatePoints.add(theoreticalMarkers[i])
+                validImagePoints.add(det)
+            }
+        }
+
+        // Generate micro-alignment correction mapping matrix if all 4 corner blocks are parsed
+        val refinementMatrix = if (validTemplatePoints.size >= 4) {
+            CardDetector.buildRefinedHomography(validTemplatePoints, validImagePoints)
+        } else {
+            Log.w(TAG, "Could not find all 4 square markers, falling back to basic QR mapping.")
+            null
+        }
+
+        // 4. Extract bubble intensities using the refined coordinate space
         val allIntensities = mutableListOf<Int>()
         val bubbleResults = mutableListOf<Pair<Int, Float>>()
+        val tempCoords = FloatArray(2)
 
         for ((index, pos) in template.bubblePositions.withIndex()) {
-            val x = pos.x.toInt()
-            val y = pos.y.toInt()
-            val avgIntensity = sampleBubbleWeighted(warped, x, y, BUBBLE_RADIUS)
+            val finalX: Int
+            val finalY: Int
+
+            if (refinementMatrix != null) {
+                tempCoords[0] = pos.x
+                tempCoords[1] = pos.y
+                refinementMatrix.mapPoints(tempCoords)
+                finalX = tempCoords[0].toInt()
+                finalY = tempCoords[1].toInt()
+            } else {
+                finalX = pos.x.toInt()
+                finalY = pos.y.toInt()
+            }
+
+            val avgIntensity = sampleBubbleWeighted(warped, finalX, finalY, BUBBLE_RADIUS)
             allIntensities.add(avgIntensity.toInt())
             bubbleResults.add(Pair(index, avgIntensity))
         }
 
-        // 4. Otsu threshold with confidence
+        // 5. Otsu threshold with confidence
         val (threshold, confidence) = ImagePreprocessor.adaptiveThresholdWithConfidence(
             allIntensities.toIntArray()
         )
 
-        // 5. Determine filled bubbles (dark = intensity < threshold)
+        // 6. Determine filled bubbles (dark = intensity < threshold)
         val filledIndices = mutableListOf<Int>()
         for ((index, intensity) in bubbleResults) {
             if (intensity < threshold) {
@@ -60,7 +96,7 @@ object OMRExtractor {
             }
         }
 
-        // 6. Adjust confidence based on borderline bubbles
+        // 7. Adjust confidence based on borderline bubbles
         val margin = threshold * 0.15f
         var lowConfidenceCount = 0
         for ((_, intensity) in bubbleResults) {

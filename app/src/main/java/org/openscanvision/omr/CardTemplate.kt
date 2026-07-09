@@ -5,32 +5,35 @@ import android.graphics.PointF
 
 data class CardTemplate(
     val name: String,
-    val prefix: String,                       // "VX" for candidate, "AGN" for agenda
-    val qrRefCorners: List<PointF>,            // 4 corners: TL, TR, BR, BL
-    val bubblePositions: List<PointF>,         // bubble centers (x, y)
+    val prefix: String,
+    val qrRefCorners: List<PointF>,
+    val bubblePositions: List<PointF>,
     val markerRefPositions: List<PointF>? = null,
     val bubbleGroups: List<IntRange>? = null
 )
 
 object Templates {
-    // 1 unit = 0.1mm (matches 85mm x 54mm exactly)
+    // 1 unit = 0.1 mm (85mm × 54mm = 850 × 540)
     const val REF_WIDTH = 850
     const val REF_HEIGHT = 540
 
+    // QR code wrapper (detected corners stay the same as before)
     val SHARED_QR_CORNERS = listOf(
-        PointF(660f, 30f),   // TL
-        PointF(820f, 30f),   // TR
-        PointF(820f, 210f),  // BR
-        PointF(660f, 210f)   // BL
+        PointF(592.5f, 52.5f),   // TL
+        PointF(727.5f, 52.5f),   // TR
+        PointF(727.5f, 187.5f),  // BR
+        PointF(592.5f, 187.5f)   // BL
     )
 
+    // 5mm × 5mm square markers at 1.2mm inset from the card edges
     val SHARED_MARKER_CORNERS = listOf(
-        PointF(25f, 25f),         // TL
-        PointF(825f, 515f),       // BR
-        PointF(25f, 515f)         // BL
+        PointF(12f, 12f),      // TL
+        PointF(838f, 12f),     // TR
+        PointF(838f, 528f),    // BR
+        PointF(12f, 528f)      // BL
     )
 
-    // Candidate: 3x4 grid, single race
+    // Candidate: single race, 3 columns × 4 rows
     val CANDIDATE_GROUPS = listOf(0..11)
 
     val CANDIDATE = CardTemplate(
@@ -40,14 +43,14 @@ object Templates {
         markerRefPositions = SHARED_MARKER_CORNERS,
         bubbleGroups = CANDIDATE_GROUPS,
         bubblePositions = listOf(
-            PointF(58f, 260f), PointF(318f, 260f), PointF(578f, 260f),
-            PointF(58f, 320f), PointF(318f, 320f), PointF(578f, 320f),
-            PointF(58f, 380f), PointF(318f, 380f), PointF(578f, 380f),
-            PointF(58f, 440f), PointF(318f, 440f), PointF(578f, 440f)
+            PointF(237f, 260f), PointF(470f, 260f), PointF(703f, 260f),
+            PointF(237f, 320f), PointF(470f, 320f), PointF(703f, 320f),
+            PointF(237f, 380f), PointF(470f, 380f), PointF(703f, 380f),
+            PointF(237f, 440f), PointF(470f, 440f), PointF(703f, 440f)
         )
     )
 
-    // Agenda: 4 rows, 3 options each
+    // Agenda: 4 rows, each with a label column + 3 option columns
     val AGENDA_GROUPS = listOf(0..2, 3..5, 6..8, 9..11)
 
     val AGENDA = CardTemplate(
@@ -57,10 +60,10 @@ object Templates {
         markerRefPositions = SHARED_MARKER_CORNERS,
         bubbleGroups = AGENDA_GROUPS,
         bubblePositions = listOf(
-            PointF(308f, 260f), PointF(488f, 260f), PointF(668f, 260f),
-            PointF(308f, 320f), PointF(488f, 320f), PointF(668f, 320f),
-            PointF(308f, 380f), PointF(488f, 380f), PointF(668f, 380f),
-            PointF(308f, 440f), PointF(488f, 440f), PointF(668f, 440f)
+            PointF(450f, 260f), PointF(630f, 260f), PointF(810f, 260f),
+            PointF(450f, 320f), PointF(630f, 320f), PointF(810f, 320f),
+            PointF(450f, 380f), PointF(630f, 380f), PointF(810f, 380f),
+            PointF(450f, 440f), PointF(630f, 440f), PointF(810f, 440f)
         )
     )
 
