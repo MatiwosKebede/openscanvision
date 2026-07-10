@@ -12,8 +12,6 @@ object OMRExtractor {
     private const val TAG = "OMRExtractor"
     private const val BUBBLE_RADIUS = 13   // in 0.1 mm units
 
-    // Precomputed weighted-offset kernel (dx, dy, weight) for a given radius.
-    // Built once per radius value instead of recomputed every bubble/frame.
     private val kernelCache = HashMap<Int, List<Triple<Int, Int, Float>>>()
 
     private fun kernelFor(radius: Int): List<Triple<Int, Int, Float>> =
@@ -30,23 +28,45 @@ object OMRExtractor {
             pts
         }
 
+    // ─── Entry points ────────────────────────────────────────────────
+
+    /**
+     * Extract marks using a homography (template → image).
+     * The homography is inverted internally, then the warped image is rotated 180°.
+     */
     fun extractCandidateMarks(
         originalBitmap: Bitmap,
         homography: Matrix
     ): Triple<List<Int>, Float, Bitmap?> {
+        val inverse = Matrix()
+        if (!homography.invert(inverse)) {
+            Log.e(TAG, "Homography not invertible")
+            return Triple(emptyList(), 0f, null)
+        }
+
         val warped = Bitmap.createBitmap(Templates.REF_WIDTH, Templates.REF_HEIGHT, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(warped)
         canvas.drawColor(Color.WHITE)
-        canvas.drawBitmap(originalBitmap, homography, Paint(Paint.FILTER_BITMAP_FLAG))
+        canvas.drawBitmap(originalBitmap, inverse, Paint(Paint.FILTER_BITMAP_FLAG))
 
         var cleaned = ImagePreprocessor.enhanceContrast(warped)
         cleaned = ImagePreprocessor.denoise(cleaned)
 
+        // Rotate 180° to fix orientation (matches the old version)
+        val rotateMatrix = Matrix().apply { postRotate(180f) }
+        val rotated = Bitmap.createBitmap(cleaned, 0, 0, cleaned.width, cleaned.height, rotateMatrix, true)
+        cleaned.recycle() // recycle the unrotated one
+        cleaned = rotated
+
         val (filled, confidence) = readCandidateBubbles(cleaned)
-        Log.d(TAG, "Candidate (ArUco): filled=$filled, confidence=$confidence")
+        Log.d(TAG, "Candidate (homography): filled=$filled, confidence=$confidence")
         return Triple(filled, confidence, cleaned)
     }
 
+    /**
+     * Extract marks using explicit card corner points (fallback).
+     * This path already uses OpenCV warp – it also needs rotation to keep consistency.
+     */
     fun extractCandidateMarks(
         originalBitmap: Bitmap,
         cardCornersImage: List<PointF>
@@ -63,29 +83,47 @@ object OMRExtractor {
         var cleaned = ImagePreprocessor.enhanceContrast(warped)
         cleaned = ImagePreprocessor.denoise(cleaned)
 
+        val rotateMatrix = Matrix().apply { postRotate(180f) }
+        val rotated = Bitmap.createBitmap(cleaned, 0, 0, cleaned.width, cleaned.height, rotateMatrix, true)
+        cleaned.recycle()
+        cleaned = rotated
+
         val (filled, confidence) = readCandidateBubbles(cleaned)
         Log.d(TAG, "Candidate (edge): filled=$filled, confidence=$confidence")
         return Triple(filled, confidence, cleaned)
     }
 
+    /**
+     * Agenda extraction (homography path) – also rotated 180°.
+     */
     fun extractAgendaMarks(
         originalBitmap: Bitmap,
         homography: Matrix
     ): Triple<List<Int>, Float, Bitmap?> {
+        val inverse = Matrix()
+        if (!homography.invert(inverse)) {
+            Log.e(TAG, "Homography not invertible")
+            return Triple(emptyList(), 0f, null)
+        }
         val warped = Bitmap.createBitmap(Templates.REF_WIDTH, Templates.REF_HEIGHT, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(warped)
         canvas.drawColor(Color.WHITE)
-        canvas.drawBitmap(originalBitmap, homography, Paint(Paint.FILTER_BITMAP_FLAG))
+        canvas.drawBitmap(originalBitmap, inverse, Paint(Paint.FILTER_BITMAP_FLAG))
 
         var cleaned = ImagePreprocessor.enhanceContrast(warped)
         cleaned = ImagePreprocessor.denoise(cleaned)
 
+        val rotateMatrix = Matrix().apply { postRotate(180f) }
+        val rotated = Bitmap.createBitmap(cleaned, 0, 0, cleaned.width, cleaned.height, rotateMatrix, true)
+        cleaned.recycle()
+        cleaned = rotated
+
         val (filled, confidence) = readAgendaBubbles(cleaned)
-        Log.d(TAG, "Agenda (ArUco): filled=$filled, confidence=$confidence")
+        Log.d(TAG, "Agenda (homography): filled=$filled, confidence=$confidence")
         return Triple(filled, confidence, cleaned)
     }
 
-    // ─── Bubble reading (shared logic) — now on a single bulk pixel array ──
+    // ─── Bubble reading (shared logic) ──────────────────────────────
 
     private fun readCandidateBubbles(cleaned: Bitmap): Pair<List<Int>, Float> =
         readBubbles(cleaned, Templates.CANDIDATE.bubblePositions)
@@ -96,7 +134,6 @@ object OMRExtractor {
     private fun readBubbles(cleaned: Bitmap, positions: List<PointF>): Pair<List<Int>, Float> {
         val w = cleaned.width
         val h = cleaned.height
-        // ONE bulk read instead of thousands of individual getPixel() JNI calls.
         val pixels = IntArray(w * h)
         cleaned.getPixels(pixels, 0, w, 0, 0, w, h)
 
@@ -138,7 +175,6 @@ object OMRExtractor {
             val y = cy + dy
             if (x < 0 || x >= width || y < 0 || y >= height) continue
             val pixel = pixels[y * width + x]
-            // Grayscale already post-enhanceContrast, so R channel is representative.
             val gray = ((pixel shr 16) and 0xFF).toDouble()
             sum += gray * weight
             weightSum += weight

@@ -59,8 +59,11 @@ import org.openscanvision.ui.components.*
 import org.openscanvision.ui.utils.*
 import java.io.OutputStream
 import java.util.concurrent.Executors
+import kotlin.math.abs
 
 private const val TAG = "ScannerScreen"
+private const val MOTION_EPSILON_PX = 15f
+private const val STABLE_FRAMES_REQUIRED = 4
 
 /* ─── Helpers ─────────────────────────────────────────────────── */
 
@@ -76,8 +79,26 @@ private fun sortCornersTopLeftFirst(corners: List<PointF>): List<PointF> {
     return listOf(tl, tr, br, bl)
 }
 
+private fun mapSensorPointsToBitmap(
+    points: List<PointF>,
+    sensorWidth: Float,
+    sensorHeight: Float,
+    rotationDegrees: Int
+): List<PointF> {
+    if (rotationDegrees % 360 == 0) return points
+    return when (rotationDegrees) {
+        90 -> points.map { PointF(sensorHeight - it.y, it.x) }
+        180 -> points.map { PointF(sensorWidth - it.x, sensorHeight - it.y) }
+        270 -> points.map { PointF(it.y, sensorWidth - it.x) }
+        else -> points
+    }
+}
+
 private fun mapBitmapPointsToSensor(
-    points: List<PointF>, sensorWidth: Float, sensorHeight: Float, rotationDegrees: Int
+    points: List<PointF>,
+    sensorWidth: Float,
+    sensorHeight: Float,
+    rotationDegrees: Int
 ): List<PointF> {
     if (rotationDegrees % 360 == 0) return points
     return when (rotationDegrees) {
@@ -289,17 +310,19 @@ fun ScannerScreen() {
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(640, 480))   // lower resolution for speed
+                    .setTargetResolution(android.util.Size(1280, 720))   // keep good resolution
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setImageQueueDepth(1)
                     .build()
 
                 var autoCaptureFired = false
+                var stableFrameCount = 0
+                var lastStableCorners: List<Offset>? = null
                 var frameCounter = 0
 
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                     frameCounter++
-                    // Skip every second frame to reduce load
+                    // Skip every second frame to reduce load (but still responsive)
                     if (frameCounter % 2 != 0) {
                         imageProxy.close()
                         return@setAnalyzer
@@ -322,85 +345,82 @@ fun ScannerScreen() {
                             val qrValue = barcode?.rawValue?.trim()
                             val qrImagePoints = barcode?.cornerPoints?.map { PointF(it.x.toFloat(), it.y.toFloat()) }
 
-                            // ArUco detection (non‑guided, same as earlier working version)
-                            val arUcoMap = CardDetector.detectArUcoMarkers(bitmap)
-                            Log.d(TAG, "ArUco found: ${arUcoMap.size} markers, IDs: ${arUcoMap.keys}")
-
-                            // Build marker screen centres
-                            val markerLabels = listOf("TL", "TR", "BR", "BL")
-                            val tempMarkerScreen = mutableMapOf<String, Offset>()
-                            for (id in 0..3) {
-                                val corners = arUcoMap[id] ?: continue
-                                val cx = corners.map { it.x }.average().toFloat()
-                                val cy = corners.map { it.y }.average().toFloat()
-                                val centreBitmap = PointF(cx, cy)
-
-                                val sensorPt = mapBitmapPointsToSensor(
-                                    listOf(centreBitmap), sensorWidth, sensorHeight, rotationDegrees
-                                ).first().let {
-                                    PointF(it.x.coerceIn(0f, sensorWidth - 1f), it.y.coerceIn(0f, sensorHeight - 1f))
-                                }
-                                val screenOffset = mapImageToScreen(
-                                    listOf(Offset(sensorPt.x, sensorPt.y)),
-                                    sensorWidth, sensorHeight, previewView
-                                )?.firstOrNull()
-                                if (screenOffset != null) tempMarkerScreen[markerLabels[id]] = screenOffset
-                            }
-                            val markerScreenMap = tempMarkerScreen.ifEmpty { null }
-                            Log.d(TAG, "markerScreenMap: $markerScreenMap")
-
-                            // Homography only if all four markers
-                            val homography = if (arUcoMap.size == 4) {
-                                CardDetector.buildHomographyFromArUco(arUcoMap)
-                            } else null
-
-                            // Card corners from homography, or bounding box of ArUco corners
-                            var imageCorners: List<PointF>? = null
-                            if (homography != null) {
-                                val templateCardCorners = listOf(
-                                    PointF(0f, 0f),
-                                    PointF(Templates.REF_WIDTH.toFloat(), 0f),
-                                    PointF(Templates.REF_WIDTH.toFloat(), Templates.REF_HEIGHT.toFloat()),
-                                    PointF(0f, Templates.REF_HEIGHT.toFloat())
-                                )
-                                imageCorners = CardDetector.predictImagePoints(templateCardCorners, homography)
-                            } else if (arUcoMap.size == 4) {
-                                val allPts = arUcoMap.values.flatten()
-                                val minX = allPts.minOf { it.x }
-                                val minY = allPts.minOf { it.y }
-                                val maxX = allPts.maxOf { it.x }
-                                val maxY = allPts.maxOf { it.y }
-                                imageCorners = listOf(
-                                    PointF(minX, minY), PointF(maxX, minY),
-                                    PointF(maxX, maxY), PointF(minX, maxY)
-                                )
-                            }
-
+                            var template: CardTemplate? = null
+                            var homography: Matrix? = null
                             var finalCardCorners: List<Offset>? = null
-                            if (imageCorners != null && imageCorners.size == 4) {
-                                val sensorCorners = mapBitmapPointsToSensor(
-                                    imageCorners, sensorWidth, sensorHeight, rotationDegrees
-                                ).map { PointF(it.x.coerceIn(0f, sensorWidth - 1f), it.y.coerceIn(0f, sensorHeight - 1f)) }
-                                finalCardCorners = mapImageToScreen(
-                                    sensorCorners.map { Offset(it.x, it.y) },
-                                    sensorWidth, sensorHeight, previewView
-                                )
-                            }
-                            Log.d(TAG, "finalCardCorners: $finalCardCorners")
+                            var markerScreenMap: Map<String, Offset>? = null
+                            var qrScreenCorners: List<Offset>? = null
+                            var arUcoFound = false
 
-                            // QR screen corners
-                            val qrScreenCorners = if (qrValue != null && qrImagePoints != null && qrImagePoints.size == 4) {
-                                mapImageToScreen(
-                                    qrImagePoints.map {
-                                        Offset(
-                                            it.x.coerceIn(0f, sensorWidth - 1f),
-                                            it.y.coerceIn(0f, sensorHeight - 1f)
+                            if (qrValue != null && qrImagePoints != null && qrImagePoints.size == 4) {
+                                template = Templates.fromPrefix(qrValue)
+                                if (template != null) {
+                                    // 1. Rotate QR points to bitmap space (if needed)
+                                    val rotatedQr = mapSensorPointsToBitmap(qrImagePoints, sensorWidth, sensorHeight, rotationDegrees)
+
+                                    // 2. Compute homography from QR + fast marker detection
+                                    val result = CardDetector.computeHomographyWithMarkers(bitmap, rotatedQr, template)
+                                    if (result != null) {
+                                        homography = result.first
+
+                                        // 3. Predict card corners and markers
+                                        val templateCard = listOf(
+                                            PointF(0f, 0f),
+                                            PointF(Templates.REF_WIDTH.toFloat(), 0f),
+                                            PointF(Templates.REF_WIDTH.toFloat(), Templates.REF_HEIGHT.toFloat()),
+                                            PointF(0f, Templates.REF_HEIGHT.toFloat())
                                         )
-                                    },
-                                    sensorWidth, sensorHeight, previewView
-                                )
-                            } else null
-                            Log.d(TAG, "qrScreenCorners: $qrScreenCorners")
+                                        val imageCorners = CardDetector.predictImagePoints(templateCard, homography)
+                                        val markerRefs = template.markerRefPositions ?: Templates.SHARED_MARKER_CENTRES
+                                        val predictedMarkers = CardDetector.predictImagePoints(markerRefs, homography)
+
+                                        // 4. Map to screen coordinates
+                                        val sensorCard = mapBitmapPointsToSensor(imageCorners, sensorWidth, sensorHeight, rotationDegrees)
+                                        finalCardCorners = mapImageToScreen(
+                                            sensorCard.map { Offset(it.x, it.y) },
+                                            sensorWidth, sensorHeight, previewView
+                                        )
+
+                                        // 5. Build marker screen map (use predicted markers as centres)
+                                        val labels = listOf("TL", "TR", "BR", "BL")
+                                        val tempMarker = mutableMapOf<String, Offset>()
+                                        for (i in labels.indices) {
+                                            val pt = predictedMarkers.getOrNull(i) ?: continue
+                                            val sensorPt = mapBitmapPointsToSensor(listOf(pt), sensorWidth, sensorHeight, rotationDegrees).first()
+                                            val screen = mapImageToScreen(
+                                                listOf(Offset(sensorPt.x, sensorPt.y)),
+                                                sensorWidth, sensorHeight, previewView
+                                            )?.firstOrNull()
+                                            if (screen != null) tempMarker[labels[i]] = screen
+                                        }
+                                        markerScreenMap = tempMarker.ifEmpty { null }
+
+                                        // 6. QR screen corners
+                                        qrScreenCorners = mapImageToScreen(
+                                            qrImagePoints.map { Offset(it.x, it.y) },
+                                            sensorWidth, sensorHeight, previewView
+                                        )
+                                    }
+                                }
+                            }
+
+                            // If homography is still null, try edge detection fallback
+                            if (homography == null) {
+                                val downsampled = downsampleBitmap(bitmap, 800, 450)
+                                val cardCorners = CardDetector.detectCardCorners(downsampled)
+                                if (cardCorners != null && cardCorners.size == 4) {
+                                    val scaleX = bitmap.width.toFloat() / downsampled.width.toFloat()
+                                    val scaleY = bitmap.height.toFloat() / downsampled.height.toFloat()
+                                    val scaled = cardCorners.map { PointF(it.x * scaleX, it.y * scaleY) }
+                                    val sensorSpace = mapBitmapPointsToSensor(scaled, sensorWidth, sensorHeight, rotationDegrees)
+                                    finalCardCorners = mapImageToScreen(
+                                        sensorSpace.map { Offset(it.x, it.y) },
+                                        sensorWidth, sensorHeight, previewView
+                                    )
+                                    // No homography available, so we cannot auto‑capture via homography.
+                                }
+                                downsampled.recycle()
+                            }
 
                             // Update live preview state
                             coroutineScope.launch(Dispatchers.Main) {
@@ -408,7 +428,7 @@ fun ScannerScreen() {
                                 rawQRCorners = qrScreenCorners
                                 rawMarkerCenters = markerScreenMap
                                 qrDetected = qrValue != null
-                                isTracking = finalCardCorners != null || arUcoMap.size == 4
+                                isTracking = finalCardCorners != null || homography != null
 
                                 latestToken = qrValue
                                 cachedHomography = homography
@@ -418,47 +438,67 @@ fun ScannerScreen() {
                                 currentFrameBitmap?.recycle()
                                 currentFrameBitmap = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
 
-                                // Reset auto‑capture when markers are lost (so it can fire again later)
-                                if (arUcoMap.size < 4) autoCaptureFired = false
+                                // Reset auto‑capture if we lost tracking
+                                if (homography == null) {
+                                    autoCaptureFired = false
+                                    stableFrameCount = 0
+                                    lastStableCorners = null
+                                }
                             }
 
-                            // Auto‑capture (once per card presentation, when all markers + QR are present)
+                            // Auto‑capture with stability check (only if we have homography)
                             if (homography != null && qrValue != null && !isProcessing && !autoCaptureFired) {
-                                autoCaptureFired = true
-                                val sensorFrameCopy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-                                coroutineScope.launch(Dispatchers.Main) {
-                                    val previewSnapshot = previewView.bitmap
-                                    if (previewSnapshot != null) {
-                                        processCurrentFrame(
-                                            sensorBitmap = sensorFrameCopy,
-                                            previewSnapshot = previewSnapshot,
-                                            homography = homography,
-                                            qrValue = qrValue,
-                                            cardCornersScreen = finalCardCorners,
-                                            qrCornersScreen = qrScreenCorners,
-                                            markerCentersScreen = markerScreenMap
-                                        )
-                                    } else {
-                                        sensorFrameCopy.recycle()
-                                        scanStatus = "Preview not ready, try again"
+                                // Check motion stability
+                                val baseline = lastStableCorners
+                                val moved = baseline == null || baseline.size != finalCardCorners?.size ||
+                                        (finalCardCorners != null && finalCardCorners.indices.any { i ->
+                                            abs(finalCardCorners[i].x - baseline[i].x) > MOTION_EPSILON_PX ||
+                                                    abs(finalCardCorners[i].y - baseline[i].y) > MOTION_EPSILON_PX
+                                        })
+                                if (moved) {
+                                    stableFrameCount = 1
+                                    lastStableCorners = finalCardCorners
+                                } else {
+                                    stableFrameCount++
+                                }
+
+                                if (stableFrameCount >= STABLE_FRAMES_REQUIRED) {
+                                    autoCaptureFired = true
+                                    val sensorFrameCopy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
+                                    coroutineScope.launch(Dispatchers.Main) {
+                                        val previewSnapshot = previewView.bitmap
+                                        if (previewSnapshot != null) {
+                                            processCurrentFrame(
+                                                sensorBitmap = sensorFrameCopy,
+                                                previewSnapshot = previewSnapshot,
+                                                homography = homography,
+                                                qrValue = qrValue,
+                                                cardCornersScreen = finalCardCorners,
+                                                qrCornersScreen = qrScreenCorners,
+                                                markerCentersScreen = markerScreenMap
+                                            )
+                                        } else {
+                                            sensorFrameCopy.recycle()
+                                            scanStatus = "Preview not ready, try again"
+                                        }
                                     }
                                 }
+                            } else {
+                                // If conditions not met, we don't reset autoCaptureFired; it will be reset when tracking lost.
                             }
 
                             imageProxy.close()
                         }
                         .addOnFailureListener(cameraExecutor) { e ->
                             Log.e(TAG, "QR detection failed", e)
-                            // Edge‑detection fallback
+                            // Fallback to edge detection only (no QR)
                             val downsampled = downsampleBitmap(bitmap, 800, 450)
                             val cardCorners = CardDetector.detectCardCorners(downsampled)
                             if (cardCorners != null && cardCorners.size == 4) {
                                 val scaleX = bitmap.width.toFloat() / downsampled.width.toFloat()
                                 val scaleY = bitmap.height.toFloat() / downsampled.height.toFloat()
-                                val scaledCorners = cardCorners.map { PointF(it.x * scaleX, it.y * scaleY) }
-                                val sensorSpace = mapBitmapPointsToSensor(
-                                    scaledCorners, sensorWidth, sensorHeight, rotationDegrees
-                                )
+                                val scaled = cardCorners.map { PointF(it.x * scaleX, it.y * scaleY) }
+                                val sensorSpace = mapBitmapPointsToSensor(scaled, sensorWidth, sensorHeight, rotationDegrees)
                                 val screenCorners = mapImageToScreen(
                                     sensorSpace.map { Offset(it.x, it.y) },
                                     sensorWidth, sensorHeight, previewView
@@ -469,7 +509,10 @@ fun ScannerScreen() {
                                     rawQRCorners = null
                                     qrDetected = false
                                     rawMarkerCenters = null
+                                    cachedHomography = null
                                     autoCaptureFired = false
+                                    stableFrameCount = 0
+                                    lastStableCorners = null
                                 }
                             } else {
                                 coroutineScope.launch(Dispatchers.Main) {
@@ -478,7 +521,10 @@ fun ScannerScreen() {
                                     rawQRCorners = null
                                     rawMarkerCenters = null
                                     qrDetected = false
+                                    cachedHomography = null
                                     autoCaptureFired = false
+                                    stableFrameCount = 0
+                                    lastStableCorners = null
                                 }
                             }
                             downsampled.recycle()
