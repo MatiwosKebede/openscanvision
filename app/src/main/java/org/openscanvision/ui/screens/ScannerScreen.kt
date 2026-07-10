@@ -22,7 +22,7 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountBox
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -59,15 +59,11 @@ import org.openscanvision.ui.components.*
 import org.openscanvision.ui.utils.*
 import java.io.OutputStream
 import java.util.concurrent.Executors
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.math.abs
 
 private const val TAG = "ScannerScreen"
-private const val MOTION_EPSILON_PX = 15f
-private const val STABLE_FRAMES_REQUIRED = 4
 
-/** Sorts four points into TL, TR, BR, BL order (used only if edge detection fallback is ever needed). */
+/* ─── Helpers ─────────────────────────────────────────────────── */
+
 private fun sortCornersTopLeftFirst(corners: List<PointF>): List<PointF> {
     if (corners.size != 4) return corners
     val sortedBySum = corners.sortedBy { it.x + it.y }
@@ -80,45 +76,8 @@ private fun sortCornersTopLeftFirst(corners: List<PointF>): List<PointF> {
     return listOf(tl, tr, br, bl)
 }
 
-/**
- * Maps points from the original sensor image space to the rotated bitmap space,
- * matching the transformation done by `imageProxy.toBitmap()`. Used ONLY to bring
- * ML-Kit's QR corner points into the same coordinate space as `bitmap` for the OMR
- * homography/processing pipeline (confirmed correct — do not change this half).
- */
-private fun mapSensorPointsToBitmap(
-    points: List<PointF>,
-    sensorWidth: Float,
-    sensorHeight: Float,
-    rotationDegrees: Int
-): List<PointF> {
-    if (rotationDegrees % 360 == 0) return points
-    return when (rotationDegrees) {
-        90 -> points.map { PointF(sensorHeight - it.y, it.x) }
-        180 -> points.map { PointF(sensorWidth - it.x, sensorHeight - it.y) }
-        270 -> points.map { PointF(it.y, sensorWidth - it.x) }
-        else -> points
-    }
-}
-
-/**
- * The exact inverse of [mapSensorPointsToBitmap]: brings points computed in rotated
- * bitmap space (e.g. card corners / markers derived from the homography, which
- * operates on `bitmap`) back into the ORIGINAL sensor coordinate space.
- *
- * This is needed specifically for the live preview overlay: `mapImageToScreen` (in
- * ui.utils) is a CameraX-style coordinate mapper built around the raw, pre-rotation
- * ImageProxy dimensions (the same convention CameraX's own OutputTransform APIs use),
- * and does its own rotation-aware mapping into PreviewView space internally. Feeding
- * it already-rotated points plus swapped (rotated) width/height double-applies the
- * rotation, which is what was producing a scattered/wrong overlay even though the
- * OMR processing pipeline (which never touches mapImageToScreen) was fine.
- */
 private fun mapBitmapPointsToSensor(
-    points: List<PointF>,
-    sensorWidth: Float,
-    sensorHeight: Float,
-    rotationDegrees: Int
+    points: List<PointF>, sensorWidth: Float, sensorHeight: Float, rotationDegrees: Int
 ): List<PointF> {
     if (rotationDegrees % 360 == 0) return points
     return when (rotationDegrees) {
@@ -129,7 +88,6 @@ private fun mapBitmapPointsToSensor(
     }
 }
 
-/** Saves a Bitmap to the device gallery. */
 private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap) {
     try {
         val filename = "OMR_${System.currentTimeMillis()}.jpg"
@@ -139,28 +97,22 @@ private fun saveBitmapToGallery(context: android.content.Context, bitmap: Bitmap
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                 put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES)
             }
-            val resolver = context.contentResolver
-            val uri: Uri? = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
             uri?.let {
-                val outputStream: OutputStream? = resolver.openOutputStream(it)
-                outputStream?.use { stream ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
-                }
+                val outputStream = context.contentResolver.openOutputStream(it)
+                outputStream?.use { stream -> bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream) }
             }
         } else {
             @Suppress("DEPRECATION")
-            MediaStore.Images.Media.insertImage(
-                context.contentResolver,
-                bitmap,
-                filename,
-                "OMR scanned card"
-            )
+            MediaStore.Images.Media.insertImage(context.contentResolver, bitmap, filename, "OMR scanned card")
         }
     } catch (e: Exception) {
         Log.e(TAG, "Error saving bitmap", e)
         Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
     }
 }
+
+/* ─── Composable Screen ───────────────────────────────────────── */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -192,16 +144,12 @@ fun ScannerScreen() {
 
     var latestToken by remember { mutableStateOf<String?>(null) }
     var currentFrameBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var currentQrPoints by remember { mutableStateOf<List<PointF>?>(null) }
-    var cachedCardImageCorners by remember { mutableStateOf<List<PointF>?>(null) }
+    var cachedHomography by remember { mutableStateOf<Matrix?>(null) }
     var cachedCardCornersScreen by remember { mutableStateOf<List<Offset>?>(null) }
     var cachedQRCornersScreen by remember { mutableStateOf<List<Offset>?>(null) }
     var cachedMarkerCentersScreen by remember { mutableStateOf<Map<String, Offset>?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
 
-    var currentCardImageCorners by remember { mutableStateOf<List<PointF>?>(null) }
-
-    // Full‑screen image viewer state
     var fullScreenBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     val previewView = remember { PreviewView(context) }
@@ -236,11 +184,7 @@ fun ScannerScreen() {
         markerCenters: Map<String, Offset>?
     ) {
         val canvas = Canvas(bitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 4f
-        }
-
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 4f }
         cardCorners?.let { corners ->
             if (corners.size == 4) {
                 val path = Path().apply {
@@ -256,7 +200,6 @@ fun ScannerScreen() {
                 paint.pathEffect = null
             }
         }
-
         qrCorners?.let { qrPts ->
             if (qrPts.size == 4) {
                 val path = Path().apply {
@@ -270,43 +213,31 @@ fun ScannerScreen() {
                 paint.pathEffect = DashPathEffect(floatArrayOf(8f, 6f), 0f)
                 canvas.drawPath(path, paint)
                 paint.pathEffect = null
-
                 val cx = qrPts.map { it.x }.average().toFloat()
                 val cy = qrPts.map { it.y }.average().toFloat()
-                paint.style = Paint.Style.FILL
-                paint.alpha = 128
+                paint.style = Paint.Style.FILL; paint.alpha = 128
                 canvas.drawCircle(cx, cy, 12f, paint)
-                paint.style = Paint.Style.STROKE
-                paint.alpha = 255
+                paint.style = Paint.Style.STROKE; paint.alpha = 255
             }
         }
-
         markerCenters?.values?.forEach { pt ->
-            paint.color = Color.Magenta.toArgb()
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 2.5f
-            paint.alpha = 64
+            paint.color = Color.Magenta.toArgb(); paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 2.5f; paint.alpha = 64
             canvas.drawCircle(pt.x, pt.y, 20f, paint)
             paint.alpha = 230
             canvas.drawCircle(pt.x, pt.y, 8f, paint)
             val crossSize = 10f
             canvas.drawLine(pt.x - crossSize, pt.y, pt.x + crossSize, pt.y, paint)
             canvas.drawLine(pt.x, pt.y - crossSize, pt.x, pt.y + crossSize, paint)
-            paint.alpha = 255
-            paint.style = Paint.Style.FILL
+            paint.alpha = 255; paint.style = Paint.Style.FILL
             canvas.drawCircle(pt.x, pt.y, 4f, paint)
             paint.style = Paint.Style.STROKE
         }
     }
 
     fun processCurrentFrame(
-        sensorBitmap: Bitmap,
-        previewSnapshot: Bitmap,
-        qrValue: String,
-        qrPoints: List<PointF>?,
-        cardCornersImage: List<PointF>?,
-        cardCornersScreen: List<Offset>?,
-        qrCornersScreen: List<Offset>?,
+        sensorBitmap: Bitmap, previewSnapshot: Bitmap, homography: Matrix, qrValue: String,
+        cardCornersScreen: List<Offset>?, qrCornersScreen: List<Offset>?,
         markerCentersScreen: Map<String, Offset>?
     ) {
         if (isProcessing) return
@@ -314,37 +245,21 @@ fun ScannerScreen() {
         isScanning = true
         scanStatus = "Processing image..."
 
-        val displayBitmap = previewSnapshot.copy(
-            previewSnapshot.config ?: Bitmap.Config.ARGB_8888, true
-        )
+        val displayBitmap = previewSnapshot.copy(previewSnapshot.config ?: Bitmap.Config.ARGB_8888, true)
         drawScreenOverlayOnBitmap(displayBitmap, cardCornersScreen, qrCornersScreen, markerCentersScreen)
 
         coroutineScope.launch(Dispatchers.IO) {
             try {
                 val (filledIndices, confidence, warpedBitmap) = OMRExtractor.extractCandidateMarks(
-                    originalBitmap = sensorBitmap,
-                    cardCornersImage = cardCornersImage,
-                    qrCorners = qrPoints ?: emptyList()
+                    originalBitmap = sensorBitmap, homography = homography
                 )
-
-                // Rotate 180° to fix upside‑down processed image
-                val finalWarped = if (warpedBitmap != null) {
-                    val matrix = Matrix()
-                    matrix.postRotate(180f)
-                    Bitmap.createBitmap(warpedBitmap, 0, 0, warpedBitmap.width, warpedBitmap.height, matrix, true)
-                        .also { warpedBitmap.recycle() }
-                } else null
-
                 withContext(Dispatchers.Main) {
                     scanResult = LocalScanResult(
                         token = qrValue,
                         filledIndices = filledIndices,
-                        scanDataJson = Gson().toJson(mapOf(
-                            "filled" to filledIndices,
-                            "confidence" to confidence
-                        )),
+                        scanDataJson = Gson().toJson(mapOf("filled" to filledIndices, "confidence" to confidence)),
                         confidence = confidence,
-                        warpedCardBitmap = finalWarped,
+                        warpedCardBitmap = warpedBitmap,
                         originalBitmap = displayBitmap
                     )
                     isScanning = false
@@ -374,19 +289,21 @@ fun ScannerScreen() {
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(1280, 720))
+                    .setTargetResolution(android.util.Size(640, 480))   // lower resolution for speed
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setImageQueueDepth(1)
                     .build()
 
-                var lastKnownCorners: List<Offset>? = null
-                var lostCount = 0
-                val maxLostFrames = 5
-                var stableFrameCount = 0
-                var lastStableCorners: List<Offset>? = null
-                var autoCaptureTriggered = false
+                var autoCaptureFired = false
+                var frameCounter = 0
 
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                    frameCounter++
+                    // Skip every second frame to reduce load
+                    if (frameCounter % 2 != 0) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
                     if (isProcessing) {
                         imageProxy.close()
                         return@setAnalyzer
@@ -394,15 +311,9 @@ fun ScannerScreen() {
 
                     val mediaImage = imageProxy.image ?: run { imageProxy.close(); return@setAnalyzer }
                     val bitmap = imageProxy.toBitmap() ?: run { imageProxy.close(); return@setAnalyzer }
-                    val imageWidth = bitmap.width.toFloat()
-                    val imageHeight = bitmap.height.toFloat()
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     val sensorWidth = imageProxy.width.toFloat()
                     val sensorHeight = imageProxy.height.toFloat()
-
-                    val downsampled = downsampleBitmap(bitmap, 800, 450)
-                    val processWidth = downsampled.width.toFloat()
-                    val processHeight = downsampled.height.toFloat()
 
                     val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
                     barcodeScanner.process(inputImage)
@@ -411,190 +322,154 @@ fun ScannerScreen() {
                             val qrValue = barcode?.rawValue?.trim()
                             val qrImagePoints = barcode?.cornerPoints?.map { PointF(it.x.toFloat(), it.y.toFloat()) }
 
-                            val rotatedQrPoints = if (qrImagePoints != null) {
-                                mapSensorPointsToBitmap(qrImagePoints, sensorWidth, sensorHeight, rotationDegrees)
+                            // ArUco detection (non‑guided, same as earlier working version)
+                            val arUcoMap = CardDetector.detectArUcoMarkers(bitmap)
+                            Log.d(TAG, "ArUco found: ${arUcoMap.size} markers, IDs: ${arUcoMap.keys}")
+
+                            // Build marker screen centres
+                            val markerLabels = listOf("TL", "TR", "BR", "BL")
+                            val tempMarkerScreen = mutableMapOf<String, Offset>()
+                            for (id in 0..3) {
+                                val corners = arUcoMap[id] ?: continue
+                                val cx = corners.map { it.x }.average().toFloat()
+                                val cy = corners.map { it.y }.average().toFloat()
+                                val centreBitmap = PointF(cx, cy)
+
+                                val sensorPt = mapBitmapPointsToSensor(
+                                    listOf(centreBitmap), sensorWidth, sensorHeight, rotationDegrees
+                                ).first().let {
+                                    PointF(it.x.coerceIn(0f, sensorWidth - 1f), it.y.coerceIn(0f, sensorHeight - 1f))
+                                }
+                                val screenOffset = mapImageToScreen(
+                                    listOf(Offset(sensorPt.x, sensorPt.y)),
+                                    sensorWidth, sensorHeight, previewView
+                                )?.firstOrNull()
+                                if (screenOffset != null) tempMarkerScreen[markerLabels[id]] = screenOffset
+                            }
+                            val markerScreenMap = tempMarkerScreen.ifEmpty { null }
+                            Log.d(TAG, "markerScreenMap: $markerScreenMap")
+
+                            // Homography only if all four markers
+                            val homography = if (arUcoMap.size == 4) {
+                                CardDetector.buildHomographyFromArUco(arUcoMap)
                             } else null
 
-                            var finalCardCorners: List<Offset>? = null
-                            var markerScreenMap: Map<String, Offset>? = null
-                            var template: CardTemplate? = null
+                            // Card corners from homography, or bounding box of ArUco corners
                             var imageCorners: List<PointF>? = null
-                            var warpImageCorners: List<PointF>? = null
-
-                            if (qrValue != null && rotatedQrPoints != null && rotatedQrPoints.size == 4) {
-                                template = Templates.fromPrefix(qrValue)
-
-                                if (template != null) {
-                                    val homography = OMRExtractor.computeMarkerHomography(bitmap, rotatedQrPoints, template)
-                                    if (homography != null) {
-                                        val templateCorners = listOf(
-                                            PointF(0f, 0f),
-                                            PointF(Templates.REF_WIDTH.toFloat(), 0f),
-                                            PointF(Templates.REF_WIDTH.toFloat(), Templates.REF_HEIGHT.toFloat()),
-                                            PointF(0f, Templates.REF_HEIGHT.toFloat())
-                                        )
-                                        imageCorners = CardDetector.predictImagePoints(templateCorners, homography)
-                                        warpImageCorners = imageCorners
-
-                                        val sensorCardCorners = mapBitmapPointsToSensor(
-                                            imageCorners!!, sensorWidth, sensorHeight, rotationDegrees
-                                        )
-                                        val screenCorners = mapImageToScreen(
-                                            sensorCardCorners.map { Offset(it.x, it.y) },
-                                            sensorWidth, sensorHeight, previewView
-                                        )
-                                        if (screenCorners != null && screenCorners.size == 4) {
-                                            finalCardCorners = screenCorners
-                                        }
-
-                                        val markerRefs = template.markerRefPositions ?: Templates.SHARED_MARKER_CORNERS
-                                        val predicted = CardDetector.predictImagePoints(markerRefs, homography)
-                                        val detected = CardDetector.detectRefMarkersNearPredicted(bitmap, predicted)
-                                        val markerLabels = listOf("TL", "TR", "BR", "BL")
-                                        val tempMarkerScreen = mutableMapOf<String, Offset>()
-                                        for (i in markerLabels.indices) {
-                                            val pt = detected.getOrNull(i) ?: continue
-                                            val sensorPt = mapBitmapPointsToSensor(
-                                                listOf(pt), sensorWidth, sensorHeight, rotationDegrees
-                                            ).first()
-                                            val screenOffset = mapImageToScreen(
-                                                listOf(Offset(sensorPt.x, sensorPt.y)),
-                                                sensorWidth, sensorHeight, previewView
-                                            )?.firstOrNull()
-                                            if (screenOffset != null) tempMarkerScreen[markerLabels[i]] = screenOffset
-                                        }
-                                        markerScreenMap = tempMarkerScreen.ifEmpty { null }
-                                    }
-                                }
+                            if (homography != null) {
+                                val templateCardCorners = listOf(
+                                    PointF(0f, 0f),
+                                    PointF(Templates.REF_WIDTH.toFloat(), 0f),
+                                    PointF(Templates.REF_WIDTH.toFloat(), Templates.REF_HEIGHT.toFloat()),
+                                    PointF(0f, Templates.REF_HEIGHT.toFloat())
+                                )
+                                imageCorners = CardDetector.predictImagePoints(templateCardCorners, homography)
+                            } else if (arUcoMap.size == 4) {
+                                val allPts = arUcoMap.values.flatten()
+                                val minX = allPts.minOf { it.x }
+                                val minY = allPts.minOf { it.y }
+                                val maxX = allPts.maxOf { it.x }
+                                val maxY = allPts.maxOf { it.y }
+                                imageCorners = listOf(
+                                    PointF(minX, minY), PointF(maxX, minY),
+                                    PointF(maxX, maxY), PointF(minX, maxY)
+                                )
                             }
 
-                            if (finalCardCorners == null) {
-                                val cardCorners = CardDetector.detectCardCorners(downsampled)
-                                if (cardCorners != null && cardCorners.size == 4) {
-                                    val scaleX = imageWidth / processWidth
-                                    val scaleY = imageHeight / processHeight
-                                    val bitmapSpaceCorners = cardCorners.map { PointF(it.x * scaleX, it.y * scaleY) }
-
-                                    if (warpImageCorners == null) {
-                                        warpImageCorners = sortCornersTopLeftFirst(bitmapSpaceCorners)
-                                    }
-
-                                    val sensorSpaceCorners = mapBitmapPointsToSensor(
-                                        bitmapSpaceCorners, sensorWidth, sensorHeight, rotationDegrees
-                                    )
-                                    finalCardCorners = sensorSpaceCorners.map { Offset(it.x, it.y) }.let {
-                                        mapImageToScreen(it, sensorWidth, sensorHeight, previewView)
-                                    }
-                                }
+                            var finalCardCorners: List<Offset>? = null
+                            if (imageCorners != null && imageCorners.size == 4) {
+                                val sensorCorners = mapBitmapPointsToSensor(
+                                    imageCorners, sensorWidth, sensorHeight, rotationDegrees
+                                ).map { PointF(it.x.coerceIn(0f, sensorWidth - 1f), it.y.coerceIn(0f, sensorHeight - 1f)) }
+                                finalCardCorners = mapImageToScreen(
+                                    sensorCorners.map { Offset(it.x, it.y) },
+                                    sensorWidth, sensorHeight, previewView
+                                )
                             }
+                            Log.d(TAG, "finalCardCorners: $finalCardCorners")
 
+                            // QR screen corners
                             val qrScreenCorners = if (qrValue != null && qrImagePoints != null && qrImagePoints.size == 4) {
                                 mapImageToScreen(
-                                    qrImagePoints.map { Offset(it.x, it.y) },
+                                    qrImagePoints.map {
+                                        Offset(
+                                            it.x.coerceIn(0f, sensorWidth - 1f),
+                                            it.y.coerceIn(0f, sensorHeight - 1f)
+                                        )
+                                    },
                                     sensorWidth, sensorHeight, previewView
                                 )
                             } else null
+                            Log.d(TAG, "qrScreenCorners: $qrScreenCorners")
 
+                            // Update live preview state
                             coroutineScope.launch(Dispatchers.Main) {
-                                cachedCardImageCorners = warpImageCorners
-                                currentCardImageCorners = warpImageCorners
+                                rawCardCorners = finalCardCorners
+                                rawQRCorners = qrScreenCorners
+                                rawMarkerCenters = markerScreenMap
+                                qrDetected = qrValue != null
+                                isTracking = finalCardCorners != null || arUcoMap.size == 4
 
                                 latestToken = qrValue
-                                currentQrPoints = rotatedQrPoints
+                                cachedHomography = homography
                                 cachedCardCornersScreen = finalCardCorners
                                 cachedQRCornersScreen = qrScreenCorners
                                 cachedMarkerCentersScreen = markerScreenMap
                                 currentFrameBitmap?.recycle()
                                 currentFrameBitmap = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
 
-                                rawCardCorners = finalCardCorners
-                                rawQRCorners = qrScreenCorners
-                                rawMarkerCenters = markerScreenMap
-                                qrDetected = qrValue != null
-                                isTracking = finalCardCorners != null
+                                // Reset auto‑capture when markers are lost (so it can fire again later)
+                                if (arUcoMap.size < 4) autoCaptureFired = false
                             }
 
-                            if (finalCardCorners != null && qrValue != null && !autoCaptureTriggered) {
-                                val baseline = lastStableCorners
-                                val moved = baseline == null || baseline.size != finalCardCorners.size ||
-                                        finalCardCorners.indices.any { i ->
-                                            abs(finalCardCorners[i].x - baseline[i].x) > MOTION_EPSILON_PX ||
-                                                    abs(finalCardCorners[i].y - baseline[i].y) > MOTION_EPSILON_PX
-                                        }
-                                if (moved) {
-                                    stableFrameCount = 1
-                                    lastStableCorners = finalCardCorners
-                                } else {
-                                    stableFrameCount++
-                                }
-
-                                if (stableFrameCount >= STABLE_FRAMES_REQUIRED) {
-                                    autoCaptureTriggered = true
-                                    val sensorFrameCopy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-                                    val capturedCardCorners = finalCardCorners
-                                    val capturedQRCorners = qrScreenCorners
-                                    val capturedMarkerMap = markerScreenMap
-                                    val capturedWarpCorners = warpImageCorners
-                                    coroutineScope.launch(Dispatchers.Main) {
-                                        val previewSnapshot = previewView.bitmap
-                                        if (previewSnapshot != null) {
-                                            processCurrentFrame(
-                                                sensorBitmap = sensorFrameCopy,
-                                                previewSnapshot = previewSnapshot,
-                                                qrValue = qrValue,
-                                                qrPoints = rotatedQrPoints,
-                                                cardCornersImage = capturedWarpCorners,
-                                                cardCornersScreen = capturedCardCorners,
-                                                qrCornersScreen = capturedQRCorners,
-                                                markerCentersScreen = capturedMarkerMap
-                                            )
-                                        } else {
-                                            sensorFrameCopy.recycle()
-                                            scanStatus = "Preview not ready, try again"
-                                        }
-                                        autoCaptureTriggered = false
+                            // Auto‑capture (once per card presentation, when all markers + QR are present)
+                            if (homography != null && qrValue != null && !isProcessing && !autoCaptureFired) {
+                                autoCaptureFired = true
+                                val sensorFrameCopy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    val previewSnapshot = previewView.bitmap
+                                    if (previewSnapshot != null) {
+                                        processCurrentFrame(
+                                            sensorBitmap = sensorFrameCopy,
+                                            previewSnapshot = previewSnapshot,
+                                            homography = homography,
+                                            qrValue = qrValue,
+                                            cardCornersScreen = finalCardCorners,
+                                            qrCornersScreen = qrScreenCorners,
+                                            markerCentersScreen = markerScreenMap
+                                        )
+                                    } else {
+                                        sensorFrameCopy.recycle()
+                                        scanStatus = "Preview not ready, try again"
                                     }
                                 }
-                            } else {
-                                stableFrameCount = 0
-                                lastStableCorners = null
-                                autoCaptureTriggered = false
                             }
 
-                            downsampled.recycle()
                             imageProxy.close()
                         }
                         .addOnFailureListener(cameraExecutor) { e ->
                             Log.e(TAG, "QR detection failed", e)
+                            // Edge‑detection fallback
+                            val downsampled = downsampleBitmap(bitmap, 800, 450)
                             val cardCorners = CardDetector.detectCardCorners(downsampled)
                             if (cardCorners != null && cardCorners.size == 4) {
-                                val scaleX = imageWidth / processWidth
-                                val scaleY = imageHeight / processHeight
-                                val bitmapSpaceCorners = cardCorners.map { PointF(it.x * scaleX, it.y * scaleY) }
-                                val sorted = sortCornersTopLeftFirst(bitmapSpaceCorners)
-
-                                val sensorSpaceCorners = mapBitmapPointsToSensor(
-                                    bitmapSpaceCorners, sensorWidth, sensorHeight, rotationDegrees
+                                val scaleX = bitmap.width.toFloat() / downsampled.width.toFloat()
+                                val scaleY = bitmap.height.toFloat() / downsampled.height.toFloat()
+                                val scaledCorners = cardCorners.map { PointF(it.x * scaleX, it.y * scaleY) }
+                                val sensorSpace = mapBitmapPointsToSensor(
+                                    scaledCorners, sensorWidth, sensorHeight, rotationDegrees
                                 )
                                 val screenCorners = mapImageToScreen(
-                                    sensorSpaceCorners.map { Offset(it.x, it.y) },
+                                    sensorSpace.map { Offset(it.x, it.y) },
                                     sensorWidth, sensorHeight, previewView
                                 )
-
                                 coroutineScope.launch(Dispatchers.Main) {
                                     rawCardCorners = screenCorners
                                     isTracking = true
                                     rawQRCorners = null
                                     qrDetected = false
                                     rawMarkerCenters = null
-                                    stableFrameCount = 0
-                                    lastStableCorners = null
-                                    autoCaptureTriggered = false
-                                    currentCardImageCorners = sorted
-                                    cachedCardImageCorners = sorted
-                                    cachedCardCornersScreen = screenCorners
-                                    cachedQRCornersScreen = null
-                                    cachedMarkerCentersScreen = null
+                                    autoCaptureFired = false
                                 }
                             } else {
                                 coroutineScope.launch(Dispatchers.Main) {
@@ -603,14 +478,7 @@ fun ScannerScreen() {
                                     rawQRCorners = null
                                     rawMarkerCenters = null
                                     qrDetected = false
-                                    stableFrameCount = 0
-                                    lastStableCorners = null
-                                    autoCaptureTriggered = false
-                                    currentCardImageCorners = null
-                                    cachedCardImageCorners = null
-                                    cachedCardCornersScreen = null
-                                    cachedQRCornersScreen = null
-                                    cachedMarkerCentersScreen = null
+                                    autoCaptureFired = false
                                 }
                             }
                             downsampled.recycle()
@@ -618,7 +486,9 @@ fun ScannerScreen() {
                         }
                 }
 
-                val camera = cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                val camera = cameraProvider.bindToLifecycle(
+                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
+                )
                 cameraError = null
                 Log.d(TAG, "Camera started successfully")
             } catch (e: Exception) {
@@ -632,97 +502,61 @@ fun ScannerScreen() {
         if (hasCameraPermission) startCamera() else permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    // ─── Full‑screen viewer with zoom & save ────────────────────────────
+    // Full‑screen viewer
     fullScreenBitmap?.let { bmp ->
         var scale by remember { mutableFloatStateOf(1f) }
         var offset by remember { mutableStateOf(Offset.Zero) }
-
         Dialog(
             onDismissRequest = { fullScreenBitmap = null },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-            ) {
-                // Zoomable & pannable image
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
                 Image(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "Full screen",
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            scaleX = scale
-                            scaleY = scale
-                            translationX = offset.x
-                            translationY = offset.y
+                            scaleX = scale; scaleY = scale
+                            translationX = offset.x; translationY = offset.y
                         }
                         .pointerInput(Unit) {
                             detectTransformGestures { _, pan, zoom, _ ->
                                 scale = (scale * zoom).coerceIn(1f, 5f)
-                                offset = Offset(
-                                    x = offset.x + pan.x,
-                                    y = offset.y + pan.y
-                                )
+                                offset = Offset(offset.x + pan.x, offset.y + pan.y)
                             }
                         }
                 )
-
-                // Save button (top‑right corner)
                 IconButton(
-                    onClick = {
-                        saveBitmapToGallery(context, bmp)
-                        Toast.makeText(context, "Image saved to gallery", Toast.LENGTH_SHORT).show()
-                    },
+                    onClick = { saveBitmapToGallery(context, bmp); Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show() },
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(16.dp)
                         .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                ) {
-                    Icon(
-                        Icons.Default.AccountBox,
-                        contentDescription = "Save",
-                        tint = Color.White
-                    )
-                }
-
-                // Tap to close (outside the image)
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable { fullScreenBitmap = null }
-                )
+                ) { Icon(Icons.Filled.AddCircle, "Save", tint = Color.White) }
+                Box(modifier = Modifier.fillMaxSize().clickable { fullScreenBitmap = null })
             }
         }
     }
 
-    // ─── UI ──────────────────────────────────────────────────────────────
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background
-    ) { padding ->
+    Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             if (!hasCameraPermission) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Camera permission required", color = Color.White)
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                            Text("Grant Permission")
-                        }
+                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("Grant Permission") }
                     }
                 }
                 return@Scaffold
             }
-
             if (cameraError != null) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(cameraError!!, color = Color.White, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick = { cameraError = null; startCamera() }) {
-                            Text("Retry")
-                        }
+                        Button(onClick = { cameraError = null; startCamera() }) { Text("Retry") }
                     }
                 }
                 return@Scaffold
@@ -735,10 +569,8 @@ fun ScannerScreen() {
                     cardCorners = smoothCorners,
                     qrCorners = smoothQRCorners,
                     markerCenters = smoothMarkerMap,
-                    bubblePositions = null,
-                    bubbleStatus = null,
-                    isTracking = isTracking,
-                    qrDetected = qrDetected,
+                    bubblePositions = null, bubbleStatus = null,
+                    isTracking = isTracking, qrDetected = qrDetected,
                     scaleFactor = 1.08f
                 )
                 if (isScanning || isProcessing) {
@@ -753,11 +585,9 @@ fun ScannerScreen() {
                 else append(" | Markers 0/4")
             }
             Text(
-                text = statusText,
+                statusText,
                 color = if (isTracking && qrDetected) Color.Green else Color.Yellow,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
+                fontSize = 14.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(8.dp)
             )
 
@@ -767,66 +597,48 @@ fun ScannerScreen() {
                         Text(if (showManualEntry) "Hide Manual Entry" else "Manual Entry")
                     }
                 }
-
                 if (showManualEntry) {
                     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             OutlinedTextField(
-                                value = manualSerial,
-                                onValueChange = { manualSerial = it },
-                                label = { Text("Enter Serial Code") },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true
+                                value = manualSerial, onValueChange = { manualSerial = it },
+                                label = { Text("Enter Serial Code") }, modifier = Modifier.fillMaxWidth(), singleLine = true
                             )
                             Spacer(Modifier.height(8.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                                Button(
-                                    onClick = {
-                                        if (manualSerial.isNotBlank()) {
-                                            scanResult = LocalScanResult(manualSerial, emptyList(), "{}", 1f)
-                                            showManualEntry = false
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    enabled = manualSerial.isNotBlank()
-                                ) { Text("Apply") }
+                                Button(onClick = {
+                                    if (manualSerial.isNotBlank()) {
+                                        scanResult = LocalScanResult(manualSerial, emptyList(), "{}", 1f)
+                                        showManualEntry = false
+                                    }
+                                }, modifier = Modifier.weight(1f), enabled = manualSerial.isNotBlank()) { Text("Apply") }
                                 Button(onClick = { showManualEntry = false }, modifier = Modifier.weight(1f)) { Text("Cancel") }
                             }
                         }
                     }
                 }
-
                 Spacer(Modifier.height(16.dp))
-
                 Button(
                     onClick = {
-                        val token = latestToken
+                        val homography = cachedHomography
                         val sensorFrame = currentFrameBitmap
                         val previewSnapshot = previewView.bitmap
-                        val imageCorners = cachedCardImageCorners
-                        val cardCornersScreen = cachedCardCornersScreen
-                        val qrCornersScreen = cachedQRCornersScreen
-                        val markerCentersScreen = cachedMarkerCentersScreen
                         when {
-                            token == null || sensorFrame == null -> scanStatus = "No frame or QR code detected yet"
-                            previewSnapshot == null -> scanStatus = "Preview not ready, try again"
-                            else -> {
-                                processCurrentFrame(
-                                    sensorBitmap = sensorFrame,
-                                    previewSnapshot = previewSnapshot,
-                                    qrValue = token,
-                                    qrPoints = currentQrPoints,
-                                    cardCornersImage = imageCorners,
-                                    cardCornersScreen = cardCornersScreen,
-                                    qrCornersScreen = qrCornersScreen,
-                                    markerCentersScreen = markerCentersScreen
-                                )
-                            }
+                            homography == null || latestToken == null || sensorFrame == null ->
+                                scanStatus = "No frame or QR code detected yet"
+                            previewSnapshot == null -> scanStatus = "Preview not ready"
+                            else -> processCurrentFrame(
+                                sensorBitmap = sensorFrame, previewSnapshot = previewSnapshot,
+                                homography = homography, qrValue = latestToken!!,
+                                cardCornersScreen = cachedCardCornersScreen,
+                                qrCornersScreen = cachedQRCornersScreen,
+                                markerCentersScreen = cachedMarkerCentersScreen
+                            )
                         }
                     },
                     modifier = Modifier.fillMaxWidth(0.7f),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFEB914)),
-                    enabled = latestToken != null && currentFrameBitmap != null
+                    enabled = cachedHomography != null && latestToken != null && currentFrameBitmap != null
                 ) { Text("Capture & Verify", color = Color.Black, fontWeight = FontWeight.Bold) }
             }
 
@@ -839,38 +651,24 @@ fun ScannerScreen() {
                     text = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                // Processed image – clickable for full screen
                                 Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text("Processed", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     if (result.warpedCardBitmap != null) {
-                                        Image(
-                                            bitmap = result.warpedCardBitmap.asImageBitmap(),
-                                            contentDescription = "Processed",
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(180.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .clickable { fullScreenBitmap = result.warpedCardBitmap }
-                                        )
+                                        Image(bitmap = result.warpedCardBitmap.asImageBitmap(), contentDescription = "Processed",
+                                            modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp))
+                                                .clickable { fullScreenBitmap = result.warpedCardBitmap })
                                     } else {
                                         Box(modifier = Modifier.fillMaxWidth().height(180.dp).background(Color.Gray), contentAlignment = Alignment.Center) {
                                             Text("No image", color = Color.White, fontSize = 12.sp)
                                         }
                                     }
                                 }
-                                // Original image – also clickable for full screen
                                 Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text("Original", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     if (result.originalBitmap != null) {
-                                        Image(
-                                            bitmap = result.originalBitmap.asImageBitmap(),
-                                            contentDescription = "Original with overlay",
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(180.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .clickable { fullScreenBitmap = result.originalBitmap }
-                                        )
+                                        Image(bitmap = result.originalBitmap.asImageBitmap(), contentDescription = "Original",
+                                            modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp))
+                                                .clickable { fullScreenBitmap = result.originalBitmap })
                                     } else {
                                         Box(modifier = Modifier.fillMaxWidth().height(180.dp).background(Color.Gray), contentAlignment = Alignment.Center) {
                                             Text("No image", color = Color.White, fontSize = 12.sp)
@@ -895,12 +693,8 @@ fun ScannerScreen() {
                             var showDetails by remember { mutableStateOf(false) }
                             TextButton(onClick = { showDetails = !showDetails }) { Text(if (showDetails) "Hide raw data" else "Show raw data") }
                             if (showDetails) {
-                                Text(
-                                    result.scanDataJson,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)).padding(8.dp)
-                                )
+                                Text(result.scanDataJson, fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                                    modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)).padding(8.dp))
                             }
                         }
                     },
@@ -913,12 +707,5 @@ fun ScannerScreen() {
                 )
             }
         }
-    }
-}
-
-private suspend fun <T> Task<T>.await(): T {
-    return suspendCancellableCoroutine { continuation ->
-        addOnSuccessListener { result: T -> continuation.resume(result) }
-        addOnFailureListener { exception: Exception -> continuation.resumeWithException(exception) }
     }
 }

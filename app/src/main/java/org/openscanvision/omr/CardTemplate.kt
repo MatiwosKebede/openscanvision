@@ -1,8 +1,17 @@
-// CardTemplate.kt
 package org.openscanvision.omr
 
 import android.graphics.PointF
 
+/**
+ * Card template definitions.
+ *
+ * All coordinates are in 0.1 mm units (85 mm × 54 mm → 850 × 540).
+ *
+ * ArUco markers (5 mm × 5 mm) are placed 1.2 mm from the edges.
+ * - Marker IDs: 0 = TL, 1 = TR, 2 = BR, 3 = BL.
+ * - Marker centres are stored for reference; marker corners are used for
+ *   homography calculation.
+ */
 data class CardTemplate(
     val name: String,
     val prefix: String,
@@ -13,11 +22,10 @@ data class CardTemplate(
 )
 
 object Templates {
-    // 1 unit = 0.1 mm (85mm × 54mm = 850 × 540)
     const val REF_WIDTH = 850
     const val REF_HEIGHT = 540
 
-    // QR code wrapper (detected corners stay the same as before)
+    // QR code wrapper (unchanged)
     val SHARED_QR_CORNERS = listOf(
         PointF(592.5f, 52.5f),   // TL
         PointF(727.5f, 52.5f),   // TR
@@ -25,45 +33,54 @@ object Templates {
         PointF(592.5f, 187.5f)   // BL
     )
 
-    // 5mm × 5mm square markers at 1.2mm inset from the card edges
-    val SHARED_MARKER_CORNERS = listOf(
-        PointF(12f, 12f),      // TL
-        PointF(838f, 12f),     // TR
-        PointF(838f, 528f),    // BR
-        PointF(12f, 528f)      // BL
+    // ArUco marker reference points (centres of the 5×5 mm squares)
+    val SHARED_MARKER_CENTRES = listOf(
+        PointF(12f + 25f, 12f + 25f),       // TL centre = (37, 37)
+        PointF(838f - 25f, 12f + 25f),      // TR centre = (813, 37)
+        PointF(838f - 25f, 528f - 25f),     // BR centre = (813, 503)
+        PointF(12f + 25f, 528f - 25f)       // BL centre = (37, 503)
     )
 
-    // Candidate: single race, 3 columns × 4 rows
+    // ArUco marker corner positions (5mm squares, 1.2mm inset)
+    // Order: TL, TR, BR, BL for each marker (OpenCV’s corner order)
+    val ARUCO_TEMPLATE_CORNERS: Map<Int, List<PointF>> = mapOf(
+        0 to listOf(PointF(12f,12f), PointF(62f,12f), PointF(62f,62f), PointF(12f,62f)),
+        1 to listOf(PointF(788f,12f), PointF(838f,12f), PointF(838f,62f), PointF(788f,62f)),
+        2 to listOf(PointF(788f,478f), PointF(838f,478f), PointF(838f,528f), PointF(788f,528f)),
+        3 to listOf(PointF(12f,478f), PointF(62f,478f), PointF(62f,528f), PointF(12f,528f))
+    )
+
+    // Candidate card: single race, 3 columns × 4 rows
     val CANDIDATE_GROUPS = listOf(0..11)
 
     val CANDIDATE = CardTemplate(
         name = "Candidate",
         prefix = "VX",
         qrRefCorners = SHARED_QR_CORNERS,
-        markerRefPositions = SHARED_MARKER_CORNERS,
+        markerRefPositions = SHARED_MARKER_CENTRES,
         bubbleGroups = CANDIDATE_GROUPS,
         bubblePositions = listOf(
-            PointF(237f, 260f), PointF(470f, 260f), PointF(703f, 260f),
-            PointF(237f, 320f), PointF(470f, 320f), PointF(703f, 320f),
-            PointF(237f, 380f), PointF(470f, 380f), PointF(703f, 380f),
-            PointF(237f, 440f), PointF(470f, 440f), PointF(703f, 440f)
+            PointF(64f, 247f), PointF(297f, 247f), PointF(530f, 247f),
+            PointF(64f, 307f), PointF(297f, 307f), PointF(530f, 307f),
+            PointF(64f, 367f), PointF(297f, 367f), PointF(530f, 367f),
+            PointF(64f, 427f), PointF(297f, 427f), PointF(530f, 427f)
         )
     )
 
-    // Agenda: 4 rows, each with a label column + 3 option columns
+    // Agenda card: 4 rows, each with label column + 3 option columns
     val AGENDA_GROUPS = listOf(0..2, 3..5, 6..8, 9..11)
 
     val AGENDA = CardTemplate(
         name = "Agenda",
         prefix = "AGN",
         qrRefCorners = SHARED_QR_CORNERS,
-        markerRefPositions = SHARED_MARKER_CORNERS,
+        markerRefPositions = SHARED_MARKER_CENTRES,
         bubbleGroups = AGENDA_GROUPS,
         bubblePositions = listOf(
-            PointF(450f, 260f), PointF(630f, 260f), PointF(810f, 260f),
-            PointF(450f, 320f), PointF(630f, 320f), PointF(810f, 320f),
-            PointF(450f, 380f), PointF(630f, 380f), PointF(810f, 380f),
-            PointF(450f, 440f), PointF(630f, 440f), PointF(810f, 440f)
+            PointF(277f, 247f), PointF(457f, 247f), PointF(637f, 247f),
+            PointF(277f, 307f), PointF(457f, 307f), PointF(637f, 307f),
+            PointF(277f, 367f), PointF(457f, 367f), PointF(637f, 367f),
+            PointF(277f, 427f), PointF(457f, 427f), PointF(637f, 427f)
         )
     )
 

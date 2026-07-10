@@ -50,7 +50,7 @@ dependencies {
     implementation("androidx.camera:camera-view:1.3.0")
 
     // OpenCV (for contour detection and homography)
-    implementation("com.quickbirdstudios:opencv:4.5.3.0")
+    implementation("com.quickbirdstudios:opencv-contrib:4.5.3.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
