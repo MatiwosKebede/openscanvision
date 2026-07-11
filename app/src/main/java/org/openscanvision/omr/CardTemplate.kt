@@ -4,13 +4,11 @@ import android.graphics.PointF
 
 /**
  * Card template definitions.
- *
  * All coordinates are in 0.1 mm units (85 mm × 54 mm → 850 × 540).
  *
  * ArUco markers (5 mm × 5 mm) are placed 1.2 mm from the edges.
  * - Marker IDs: 0 = TL, 1 = TR, 2 = BR, 3 = BL.
- * - Marker centres are stored for reference; marker corners are used for
- *   homography calculation.
+ * - Marker corners are used for homography calculation.
  */
 data class CardTemplate(
     val name: String,
@@ -33,26 +31,24 @@ object Templates {
         PointF(592.5f, 187.5f)   // BL
     )
 
-    // ArUco marker reference points (centres of the 5×5 mm squares)
+    // Marker centres (for centroid fallback)
     val SHARED_MARKER_CENTRES = listOf(
-        PointF(12f + 25f, 12f + 25f),       // TL centre = (37, 37)
-        PointF(838f - 25f, 12f + 25f),      // TR centre = (813, 37)
-        PointF(838f - 25f, 528f - 25f),     // BR centre = (813, 503)
-        PointF(12f + 25f, 528f - 25f)       // BL centre = (37, 503)
+        PointF(37f, 37f),      // TL
+        PointF(813f, 37f),     // TR
+        PointF(813f, 503f),    // BR
+        PointF(37f, 503f)      // BL
     )
 
-    // ArUco marker corner positions (5mm squares, 1.2mm inset)
-    // Order: TL, TR, BR, BL for each marker (OpenCV’s corner order)
+    // ArUco marker corners (5mm squares, 1.2mm inset)
     val ARUCO_TEMPLATE_CORNERS: Map<Int, List<PointF>> = mapOf(
-        0 to listOf(PointF(12f,12f), PointF(62f,12f), PointF(62f,62f), PointF(12f,62f)),
-        1 to listOf(PointF(788f,12f), PointF(838f,12f), PointF(838f,62f), PointF(788f,62f)),
-        2 to listOf(PointF(788f,478f), PointF(838f,478f), PointF(838f,528f), PointF(788f,528f)),
-        3 to listOf(PointF(12f,478f), PointF(62f,478f), PointF(62f,528f), PointF(12f,528f))
+        0 to listOf(PointF(12f, 12f), PointF(62f, 12f), PointF(62f, 62f), PointF(12f, 62f)),
+        1 to listOf(PointF(788f, 12f), PointF(838f, 12f), PointF(838f, 62f), PointF(788f, 62f)),
+        2 to listOf(PointF(788f, 478f), PointF(838f, 478f), PointF(838f, 528f), PointF(788f, 528f)),
+        3 to listOf(PointF(12f, 478f), PointF(62f, 478f), PointF(62f, 528f), PointF(12f, 528f))
     )
 
     // Candidate card: single race, 3 columns × 4 rows
     val CANDIDATE_GROUPS = listOf(0..11)
-
     val CANDIDATE = CardTemplate(
         name = "Candidate",
         prefix = "VX",
@@ -69,7 +65,6 @@ object Templates {
 
     // Agenda card: 4 rows, each with label column + 3 option columns
     val AGENDA_GROUPS = listOf(0..2, 3..5, 6..8, 9..11)
-
     val AGENDA = CardTemplate(
         name = "Agenda",
         prefix = "AGN",

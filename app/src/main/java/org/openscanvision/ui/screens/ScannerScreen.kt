@@ -32,32 +32,66 @@ import kotlinx.coroutines.*
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.openscanvision.omr.CardDetector
+import org.openscanvision.omr.Templates
 import org.openscanvision.ui.components.StaticViewfinder
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 private const val TAG = "ArUcoScanner"
 
-// How many consecutive frames tracking is allowed to find nothing before
-// we pay for a reacquire scan. Keeps steady-state cost low (small ROIs
-// only) while still recovering quickly from lost track.
-private const val MAX_FRAMES_BEFORE_RESCAN = 8
-private const val TRACK_HALF_SIZE_PX = 70
-private const val REACQUIRE_DOWNSCALE = 0.5
-// Smoothing applied only to what's drawn on screen (not to the positions
-// fed back into tracking/search), to cut jitter without adding search lag.
-private const val DISPLAY_SMOOTHING_ALPHA = 0.55f
+// ─── Optimised constants ──────────────────────────────────────────
 
-// ─── Helper functions (copied from ui.utils to avoid imports) ──
+private const val MAX_FRAMES_BEFORE_RESCAN = 20
+private const val BASE_TRACK_HALF_SIZE = 55          // reduced from 70
+private const val MIN_TRACK_HALF_SIZE = 30           // reduced from 40
+private const val MAX_TRACK_HALF_SIZE = 100          // reduced from 130
+private const val DISPLAY_SMOOTHING_ALPHA = 0.25f
+private const val CONFIDENCE_THRESHOLD = 5
+private const val CONFIDENCE_DECAY = 0.85f
+private const val PERSISTENCE_FRAMES = 20
+private const val ACCELERATION_NOISE = 0.02f
 
-/**
- * Rotates points from raw buffer space into the "upright" frame that
- * matches what the user visually sees (i.e. what rotationDegrees corrects for).
- *
- * NOTE: for 90/270 the width/height axes swap. Callers must pass the
- * POST-rotation width/height (not the raw buffer width/height) to any
- * function that scales these points against a target view.
- */
+// ─── Constant‑acceleration Kalman filter ────────────────────────
+
+private data class KalmanState(
+    var x: Float, var y: Float,
+    var vx: Float, var vy: Float,
+    var ax: Float, var ay: Float,
+    var px: Float = 1f, var py: Float = 1f,
+    var pvx: Float = 1f, var pvy: Float = 1f,
+    var pax: Float = 0.5f, var pay: Float = 0.5f
+) {
+    fun predict(dt: Float = 1f) {
+        x += vx * dt + 0.5f * ax * dt * dt
+        y += vy * dt + 0.5f * ay * dt * dt
+        vx += ax * dt
+        vy += ay * dt
+        px += pvx * dt * dt + 0.25f * pax * dt * dt * dt * dt
+        py += pvy * dt * dt + 0.25f * pay * dt * dt * dt * dt
+        pvx += pax * dt * dt + ACCELERATION_NOISE
+        pvy += pay * dt * dt + ACCELERATION_NOISE
+        pax += ACCELERATION_NOISE
+        pay += ACCELERATION_NOISE
+    }
+
+    fun update(measuredX: Float, measuredY: Float) {
+        val kx = px / (px + 1f)
+        val ky = py / (py + 1f)
+        val residualX = measuredX - x
+        val residualY = measuredY - y
+        x += kx * residualX
+        y += ky * residualY
+        vx += kx * residualX / 1f
+        vy += ky * residualY / 1f
+        ax += kx * residualX / 2f
+        ay += ky * residualY / 2f
+        px = (1f - kx) * px
+        py = (1f - ky) * py
+    }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────
+
 private fun mapBitmapPointsToSensor(
     points: List<PointF>,
     sensorWidth: Float,
@@ -73,12 +107,6 @@ private fun mapBitmapPointsToSensor(
     }
 }
 
-/**
- * Maps points from a rotation-corrected analysis frame (frameWidth x frameHeight)
- * into PreviewView screen coordinates. Replicates PreviewView's default
- * FILL_CENTER scaleType (uniform scale, center-crop). Switch maxOf -> minOf
- * if you've explicitly set FIT_CENTER.
- */
 private fun mapImageToScreen(
     points: List<Offset>,
     frameWidth: Float,
@@ -98,15 +126,6 @@ private fun mapImageToScreen(
     return points.map { Offset(it.x * scale + offsetX, it.y * scale + offsetY) }
 }
 
-/**
- * Builds a single-channel grayscale OpenCV Mat directly from the Y-plane
- * of a YUV_420_888 ImageProxy. This is the fast path: it skips YUV->RGB
- * conversion, a Bitmap allocation, and the extra color-conversion that
- * CardDetector's Bitmap-based functions would otherwise redo internally.
- * ArUco detection only ever needs luma, so this is the entire input it needs.
- *
- * Caller owns the returned Mat and must release() it.
- */
 private fun yPlaneToGrayMat(imageProxy: ImageProxy): Mat {
     val yPlane = imageProxy.planes[0]
     val buffer: ByteBuffer = yPlane.buffer
@@ -118,12 +137,10 @@ private fun yPlaneToGrayMat(imageProxy: ImageProxy): Mat {
     val mat = Mat(height, width, CvType.CV_8UC1)
 
     if (pixelStride == 1 && rowStride == width) {
-        // Fully contiguous — single bulk copy.
         val bytes = ByteArray(buffer.remaining())
         buffer.get(bytes)
         mat.put(0, 0, bytes)
     } else if (pixelStride == 1) {
-        // Row-padded (rowStride > width) but pixels within a row are contiguous.
         val rowBytes = ByteArray(width)
         for (row in 0 until height) {
             buffer.position(row * rowStride)
@@ -131,8 +148,6 @@ private fun yPlaneToGrayMat(imageProxy: ImageProxy): Mat {
             mat.put(row, 0, rowBytes)
         }
     } else {
-        // Rare: non-unit pixel stride within the Y plane. Fall back to a
-        // per-pixel strided copy (still avoids full YUV->RGB conversion).
         val rowBytes = ByteArray(rowStride)
         val outRow = ByteArray(width)
         for (row in 0 until height) {
@@ -157,8 +172,7 @@ fun ScannerScreen() {
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
 
-    // ─── Permission ──────────────────────────────────────────────
-
+    // Permission
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
@@ -168,8 +182,7 @@ fun ScannerScreen() {
         ActivityResultContracts.RequestPermission()
     ) { hasCameraPermission = it }
 
-    // ─── UI state ─────────────────────────────────────────────────
-
+    // UI state
     var detectedMarkers by remember { mutableStateOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) }
     var isTracking by remember { mutableStateOf(false) }
 
@@ -179,18 +192,18 @@ fun ScannerScreen() {
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
-    // Analyzer-thread-only state (NOT Compose state — mutated and read
-    // exclusively on cameraExecutor, so no recomposition/allocation cost
-    // per frame just for tracking bookkeeping).
-    val lastKnownCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }       // this frame's raw centres
-    val previousCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }        // prior frame's raw centres (for velocity)
-    val smoothedMarkersRef = remember { arrayOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) } // EMA'd, screen-space
-    val framesSinceFullScanRef = remember { intArrayOf(MAX_FRAMES_BEFORE_RESCAN) } // force scan on first frame
+    // Analyzer state
+    val kalmanFilters = remember { mutableMapOf<Int, KalmanState>() }
+    val markerConfidence = remember { mutableMapOf<Int, Int>() }
+    val markerAge = remember { mutableMapOf<Int, Int>() }
+    val lastKnownCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }
+    val previousCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }
+    val smoothedMarkersRef = remember { arrayOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) }
+    val framesSinceFullScanRef = remember { intArrayOf(MAX_FRAMES_BEFORE_RESCAN) }
+    val stableFrameCounter = remember { intArrayOf(0) }
 
     DisposableEffect(Unit) {
-        onDispose {
-            cameraExecutor.shutdown()
-        }
+        onDispose { cameraExecutor.shutdown() }
     }
 
     DisposableEffect(previewView) {
@@ -215,80 +228,136 @@ fun ScannerScreen() {
                 val preview = Preview.Builder().build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
+                // Lower resolution for speed (480x360)
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(640, 480))
+                    .setTargetResolution(android.util.Size(480, 360))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setImageQueueDepth(1)
                     .build()
 
+                var frameCounter = 0
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    val mediaImage = imageProxy.image
-                    if (mediaImage == null) {
+                    frameCounter++
+                    // Adaptive frame skip: skip more when stable
+                    val shouldProcess = when {
+                        stableFrameCounter[0] > 20 -> frameCounter % 4 == 0   // very stable: every 4th
+                        stableFrameCounter[0] > 10 -> frameCounter % 3 == 0   // stable: every 3rd
+                        else -> frameCounter % 2 == 0                         // normal: every 2nd
+                    }
+                    if (!shouldProcess) {
                         imageProxy.close()
                         return@setAnalyzer
                     }
 
+                    val mediaImage = imageProxy.image ?: run { imageProxy.close(); return@setAnalyzer }
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     val bufferWidth = imageProxy.width.toFloat()
                     val bufferHeight = imageProxy.height.toFloat()
                     val rotatedWidth = if (rotationDegrees % 180 == 0) bufferWidth else bufferHeight
                     val rotatedHeight = if (rotationDegrees % 180 == 0) bufferHeight else bufferWidth
 
-                    // Fast path: grayscale Mat straight from the Y-plane, no Bitmap.
                     val gray = yPlaneToGrayMat(imageProxy)
 
-                    val arUcoMap: Map<Int, List<PointF>>
-                    try {
-                        val lastCentres = lastKnownCentresRef[0]
-                        val prevCentres = previousCentresRef[0]
-                        val needsReacquire = lastCentres.isEmpty() ||
-                                framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
+                    val lastCentres = lastKnownCentresRef[0]
+                    val prevCentres = previousCentresRef[0]
+                    val needsReacquire = lastCentres.isEmpty() ||
+                            framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
 
-                        arUcoMap = if (!needsReacquire) {
-                            // Predict where each marker will be this frame using simple
-                            // constant-velocity extrapolation from the last two observed
-                            // positions. This keeps the search ROI centered on fast-moving
-                            // markers instead of always lagging one frame behind, so we can
-                            // afford a smaller (cheaper) ROI while tracking more reliably.
-                            val predictedCentres = lastCentres.mapValues { (id, centre) ->
-                                val prev = prevCentres[id]
-                                if (prev != null) {
-                                    PointF(centre.x + (centre.x - prev.x), centre.y + (centre.y - prev.y))
+                    var arUcoMap: Map<Int, List<PointF>> = emptyMap()
+                    try {
+                        if (!needsReacquire) {
+                            val allActiveIds = lastCentres.keys + markerAge.filter { it.value < PERSISTENCE_FRAMES }.keys
+                            val predictedCentres = allActiveIds.associateWith { id ->
+                                val kalman = kalmanFilters[id]
+                                if (kalman != null) {
+                                    kalman.predict()
+                                    PointF(kalman.x, kalman.y)
                                 } else {
-                                    centre
+                                    lastCentres[id] ?: prevCentres[id] ?: PointF(0f, 0f)
                                 }
                             }
+
+                            // Smaller ROI for high-confidence markers
+                            val halfSizeMap = allActiveIds.associateWith { id ->
+                                val conf = markerConfidence[id] ?: 0
+                                when {
+                                    conf >= CONFIDENCE_THRESHOLD -> MIN_TRACK_HALF_SIZE
+                                    conf >= 2 -> BASE_TRACK_HALF_SIZE
+                                    else -> MAX_TRACK_HALF_SIZE
+                                }
+                            }
+
                             val tracked = CardDetector.detectArUcoMarkersTrackedInGray(
-                                gray, predictedCentres, TRACK_HALF_SIZE_PX
+                                gray, predictedCentres, halfSizeMap
                             )
-                            if (tracked.size < lastCentres.size) {
-                                // Lost one or more markers this frame — force a reacquire
-                                // next frame instead of drifting silently.
+
+                            val templatePoints = Templates.SHARED_MARKER_CENTRES
+                            val filtered = if (tracked.size >= 4) {
+                                CardDetector.rejectOutliersWithHomography(tracked, templatePoints)
+                            } else tracked
+
+                            if (filtered.size < allActiveIds.size / 2) {
                                 framesSinceFullScanRef[0] = MAX_FRAMES_BEFORE_RESCAN
                             } else {
                                 framesSinceFullScanRef[0]++
                             }
-                            tracked
+                            arUcoMap = filtered
                         } else {
-                            // Coarse-to-fine reacquire: cheap downscaled full-frame
-                            // localization + full-res sub-pixel refine per hit. Faster
-                            // AND more accurate than a single full-res pass.
-                            val reacquired = CardDetector.detectArUcoMarkersReacquire(gray, REACQUIRE_DOWNSCALE)
+                            // Faster reacquire with fewer scales
+                            val reacquired = CardDetector.detectArUcoMarkersReacquire(gray, listOf(0.4, 0.7, 1.0))
+                            val templatePoints = Templates.SHARED_MARKER_CENTRES
+                            arUcoMap = if (reacquired.size >= 4) {
+                                CardDetector.rejectOutliersWithHomography(reacquired, templatePoints)
+                            } else reacquired
                             framesSinceFullScanRef[0] = 0
-                            reacquired
                         }
                     } finally {
                         gray.release()
                     }
 
-                    // Shift tracking state for next frame's velocity estimate.
+                    // Update state
+                    val detectedIds = arUcoMap.keys
+                    for (id in markerAge.keys) {
+                        markerAge[id] = (markerAge[id] ?: 0) + 1
+                    }
+                    for (id in detectedIds) {
+                        val corners = arUcoMap[id] ?: continue
+                        val cx = corners.map { it.x }.average().toFloat()
+                        val cy = corners.map { it.y }.average().toFloat()
+                        val kalman = kalmanFilters[id]
+                        if (kalman != null) {
+                            kalman.update(cx, cy)
+                        } else {
+                            kalmanFilters[id] = KalmanState(cx, cy, 0f, 0f, 0f, 0f)
+                        }
+                        markerConfidence[id] = (markerConfidence[id] ?: 0) + 1
+                        markerAge[id] = 0
+                    }
+                    for (id in markerConfidence.keys) {
+                        if (id !in detectedIds) {
+                            markerConfidence[id] = ((markerConfidence[id] ?: 0) * CONFIDENCE_DECAY).toInt()
+                        }
+                    }
+                    val toRemove = markerAge.filter { it.value > PERSISTENCE_FRAMES && (markerConfidence[it.key] ?: 0) < 3 }.keys
+                    for (id in toRemove) {
+                        kalmanFilters.remove(id)
+                        markerConfidence.remove(id)
+                        markerAge.remove(id)
+                    }
+
                     previousCentresRef[0] = lastKnownCentresRef[0]
                     lastKnownCentresRef[0] = arUcoMap.mapValues { (_, corners) ->
                         PointF(corners.map { it.x }.average().toFloat(), corners.map { it.y }.average().toFloat())
                     }
 
-                    // Map corners to screen coordinates (raw, unsmoothed — this is what
-                    // feeds next frame's search, so it must reflect the true detection).
+                    val highConf = markerConfidence.filter { it.value >= CONFIDENCE_THRESHOLD }.size
+                    if (highConf >= 3 && arUcoMap.size >= 3) {
+                        stableFrameCounter[0]++
+                    } else {
+                        stableFrameCounter[0] = 0
+                    }
+
+                    // Map to screen
                     val rawScreenMarkers = mutableMapOf<Int, Pair<Offset, List<Offset>>>()
                     for ((id, corners) in arUcoMap) {
                         val sensorCorners = mapBitmapPointsToSensor(corners, bufferWidth, bufferHeight, rotationDegrees)
@@ -305,9 +374,6 @@ fun ScannerScreen() {
                         }
                     }
 
-                    // Exponential moving average purely for display — cuts visual jitter
-                    // from per-frame corner noise without adding lag to the actual
-                    // tracking/search logic above, which always uses raw detections.
                     val prevSmoothed = smoothedMarkersRef[0]
                     val smoothed = rawScreenMarkers.mapValues { (id, raw) ->
                         val prev = prevSmoothed[id]
@@ -349,9 +415,7 @@ fun ScannerScreen() {
                             Rational(w, h),
                             previewView.display?.rotation ?: android.view.Surface.ROTATION_0
                         ).build()
-                    } else {
-                        null
-                    }
+                    } else null
                 }
 
                 if (viewPort != null) {
@@ -360,12 +424,10 @@ fun ScannerScreen() {
                         .addUseCase(analysis)
                         .setViewPort(viewPort)
                         .build()
-
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup
                     )
                 } else {
-                    Log.w(TAG, "PreviewView not laid out yet, binding without ViewPort")
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
                     )

@@ -28,12 +28,6 @@ object OMRExtractor {
             pts
         }
 
-    // ─── Entry points ────────────────────────────────────────────────
-
-    /**
-     * Extract marks using a homography (template → image).
-     * The homography is inverted internally, then the warped image is rotated 180°.
-     */
     fun extractCandidateMarks(
         originalBitmap: Bitmap,
         homography: Matrix
@@ -52,10 +46,10 @@ object OMRExtractor {
         var cleaned = ImagePreprocessor.enhanceContrast(warped)
         cleaned = ImagePreprocessor.denoise(cleaned)
 
-        // Rotate 180° to fix orientation (matches the old version)
+        // Rotate 180° to fix orientation
         val rotateMatrix = Matrix().apply { postRotate(180f) }
         val rotated = Bitmap.createBitmap(cleaned, 0, 0, cleaned.width, cleaned.height, rotateMatrix, true)
-        cleaned.recycle() // recycle the unrotated one
+        cleaned.recycle()
         cleaned = rotated
 
         val (filled, confidence) = readCandidateBubbles(cleaned)
@@ -63,10 +57,6 @@ object OMRExtractor {
         return Triple(filled, confidence, cleaned)
     }
 
-    /**
-     * Extract marks using explicit card corner points (fallback).
-     * This path already uses OpenCV warp – it also needs rotation to keep consistency.
-     */
     fun extractCandidateMarks(
         originalBitmap: Bitmap,
         cardCornersImage: List<PointF>
@@ -93,9 +83,6 @@ object OMRExtractor {
         return Triple(filled, confidence, cleaned)
     }
 
-    /**
-     * Agenda extraction (homography path) – also rotated 180°.
-     */
     fun extractAgendaMarks(
         originalBitmap: Bitmap,
         homography: Matrix
@@ -122,8 +109,6 @@ object OMRExtractor {
         Log.d(TAG, "Agenda (homography): filled=$filled, confidence=$confidence")
         return Triple(filled, confidence, cleaned)
     }
-
-    // ─── Bubble reading (shared logic) ──────────────────────────────
 
     private fun readCandidateBubbles(cleaned: Bitmap): Pair<List<Int>, Float> =
         readBubbles(cleaned, Templates.CANDIDATE.bubblePositions)
