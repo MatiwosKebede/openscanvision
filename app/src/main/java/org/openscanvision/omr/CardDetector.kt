@@ -7,6 +7,7 @@ import android.util.Log
 import org.opencv.android.Utils
 import org.opencv.aruco.Aruco
 import org.opencv.aruco.DetectorParameters
+import org.opencv.aruco.Dictionary
 import org.opencv.calib3d.Calib3d
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
@@ -14,11 +15,161 @@ import org.opencv.imgproc.Imgproc
 object CardDetector {
     private const val TAG = "CardDetector"
 
-    // ─── ArUco constants ──────────────────────────────────────────
-
     private const val ARUCO_DICT_ID = Aruco.DICT_5X5_50
 
-    // ─── Guided ArUco detection (fast, region‑based) ─────────────
+    // ─── Shared objects (created once) ────────────────────────────
+
+    private val sharedDictionary: Dictionary by lazy { Aruco.getPredefinedDictionary(ARUCO_DICT_ID) }
+
+    // Fast profile: coarse localisation (used on downscaled frames)
+    private val fastParams: DetectorParameters by lazy {
+        DetectorParameters.create().apply {
+            set_adaptiveThreshWinSizeMin(5)
+            set_adaptiveThreshWinSizeMax(17)        // smaller = faster
+            set_adaptiveThreshWinSizeStep(8)        // larger step = fewer thresholds
+            set_polygonalApproxAccuracyRate(0.12)
+            set_minCornerDistanceRate(0.01)
+            set_minMarkerPerimeterRate(0.01)
+            set_minMarkerDistanceRate(0.01)
+            set_perspectiveRemovePixelPerCell(2)
+            set_perspectiveRemoveIgnoredMarginPerCell(0.2)
+            set_cornerRefinementMethod(Aruco.CORNER_REFINE_NONE)
+        }
+    }
+
+    // Accurate profile: sub‑pixel refinement (used on ROIs)
+    private val accurateParams: DetectorParameters by lazy {
+        DetectorParameters.create().apply {
+            set_adaptiveThreshWinSizeMin(3)
+            set_adaptiveThreshWinSizeMax(31)
+            set_adaptiveThreshWinSizeStep(4)
+            set_polygonalApproxAccuracyRate(0.08)
+            set_minCornerDistanceRate(0.01)
+            set_minMarkerPerimeterRate(0.005)
+            set_minMarkerDistanceRate(0.01)
+            set_perspectiveRemovePixelPerCell(4)
+            set_perspectiveRemoveIgnoredMarginPerCell(0.13)
+            set_cornerRefinementMethod(Aruco.CORNER_REFINE_SUBPIX)
+            set_cornerRefinementWinSize(5)
+            set_cornerRefinementMaxIterations(50)    // more iterations = more accurate
+            set_cornerRefinementMinAccuracy(0.02)    // tighter tolerance
+        }
+    }
+
+    // ─── Core detection (on grayscale Mat) ──────────────────────
+
+    fun detectArUcoMarkersInGray(
+        gray: Mat,
+        params: DetectorParameters = accurateParams
+    ): Map<Int, List<PointF>> {
+        val corners = ArrayList<Mat>()
+        val ids = Mat()
+        try {
+            Aruco.detectMarkers(gray, sharedDictionary, corners, ids, params)
+            val result = mutableMapOf<Int, List<PointF>>()
+            for (i in 0 until ids.rows()) {
+                val id = ids.get(i, 0)[0].toInt()
+                val cornerMat = corners[i]
+                val pts = (0..3).map { j ->
+                    PointF(cornerMat.get(0, j)[0].toFloat(), cornerMat.get(0, j)[1].toFloat())
+                }
+                result[id] = pts
+            }
+            return result
+        } finally {
+            ids.release()
+            corners.forEach { it.release() }
+        }
+    }
+
+    // ─── Tracking‑guided search (fast ROI‑based) ─────────────────
+
+    fun detectArUcoMarkersTrackedInGray(
+        gray: Mat,
+        searchCentres: Map<Int, PointF>,
+        halfSize: Int = 75
+    ): Map<Int, List<PointF>> {
+        if (searchCentres.isEmpty()) return emptyMap()
+        val result = mutableMapOf<Int, List<PointF>>()
+        val width = gray.cols()
+        val height = gray.rows()
+
+        for ((id, centre) in searchCentres) {
+            val left = (centre.x - halfSize).toInt().coerceIn(0, width - 1)
+            val top = (centre.y - halfSize).toInt().coerceIn(0, height - 1)
+            val right = (centre.x + halfSize).toInt().coerceIn(0, width - 1)
+            val bottom = (centre.y + halfSize).toInt().coerceIn(0, height - 1)
+            val w = right - left
+            val h = bottom - top
+            if (w < 20 || h < 20) continue
+
+            val roi = Mat(gray, Rect(left, top, w, h))
+            val localMap = try {
+                detectArUcoMarkersInGray(roi, accurateParams)
+            } finally {
+                roi.release()
+            }
+            val corners = localMap[id]
+            if (corners != null && corners.size == 4) {
+                result[id] = corners.map { PointF(it.x + left, it.y + top) }
+            }
+        }
+        return result
+    }
+
+    // ─── Reacquire: coarse + refine (faster than full‑res scan) ──
+
+    fun detectArUcoMarkersReacquire(
+        gray: Mat,
+        downscaleFactor: Double = 0.3,
+        refineHalfSizeMinPx: Int = 50
+    ): Map<Int, List<PointF>> {
+        val width = gray.cols()
+        val height = gray.rows()
+
+        val small = Mat()
+        val coarse: Map<Int, List<PointF>>
+        try {
+            Imgproc.resize(gray, small, Size(), downscaleFactor, downscaleFactor, Imgproc.INTER_AREA)
+            coarse = detectArUcoMarkersInGray(small, fastParams)
+        } finally {
+            small.release()
+        }
+        if (coarse.isEmpty()) return emptyMap()
+
+        val invScale = 1.0 / downscaleFactor
+        val result = mutableMapOf<Int, List<PointF>>()
+        for ((id, smallCorners) in coarse) {
+            val cx = smallCorners.map { it.x * invScale }.average()
+            val cy = smallCorners.map { it.y * invScale }.average()
+            val span = (smallCorners.maxOf { it.x } - smallCorners.minOf { it.x }) * invScale
+            val halfSize = span.toInt().coerceAtLeast(refineHalfSizeMinPx)
+
+            val left = (cx - halfSize).toInt().coerceIn(0, width - 1)
+            val top = (cy - halfSize).toInt().coerceIn(0, height - 1)
+            val right = (cx + halfSize).toInt().coerceIn(0, width - 1)
+            val bottom = (cy + halfSize).toInt().coerceIn(0, height - 1)
+            val w = right - left
+            val h = bottom - top
+            if (w < 20 || h < 20) continue
+
+            val roi = Mat(gray, Rect(left, top, w, h))
+            val refined = try {
+                detectArUcoMarkersInGray(roi, accurateParams)
+            } finally {
+                roi.release()
+            }
+            val fullResCorners = refined[id]
+            result[id] = if (fullResCorners != null && fullResCorners.size == 4) {
+                fullResCorners.map { PointF(it.x + left, it.y + top) }
+            } else {
+                smallCorners.map { PointF((it.x * invScale).toFloat(), (it.y * invScale).toFloat()) }
+            }
+        }
+        return result
+    }
+
+    // ─── Guided ArUco (QR‑based) ──────────────────────────────────
 
     fun detectArUcoMarkersGuided(
         bitmap: Bitmap,
@@ -30,34 +181,41 @@ object CardDetector {
         val predictedCentres = predictImagePoints(markerCentres, homography)
 
         val scaleEstimate = bitmap.width.toFloat() / Templates.REF_WIDTH.toFloat()
-        val halfSize = (80 * scaleEstimate).toInt().coerceAtLeast(80)  // increased
+        val halfSize = (80 * scaleEstimate).toInt().coerceAtLeast(80)
 
-        val result = mutableMapOf<Int, List<PointF>>()
+        val gray = bitmapToGrayMat(bitmap)
+        try {
+            val result = mutableMapOf<Int, List<PointF>>()
+            for (i in markerCentres.indices) {
+                val centre = predictedCentres[i]
+                val left = (centre.x - halfSize).toInt().coerceAtLeast(0)
+                val top = (centre.y - halfSize).toInt().coerceAtLeast(0)
+                val right = (centre.x + halfSize).toInt().coerceAtMost(bitmap.width - 1)
+                val bottom = (centre.y + halfSize).toInt().coerceAtMost(bitmap.height - 1)
+                val w = right - left
+                val h = bottom - top
+                if (w < 30 || h < 30) continue
 
-        for (i in markerCentres.indices) {
-            val centre = predictedCentres[i]
-            val left = (centre.x - halfSize).toInt().coerceAtLeast(0)
-            val top = (centre.y - halfSize).toInt().coerceAtLeast(0)
-            val right = (centre.x + halfSize).toInt().coerceAtMost(bitmap.width - 1)
-            val bottom = (centre.y + halfSize).toInt().coerceAtMost(bitmap.height - 1)
-            val w = right - left
-            val h = bottom - top
-            if (w < 30 || h < 30) continue
-
-            val roi = Bitmap.createBitmap(bitmap, left, top, w, h)
-            val localMap = detectArUcoMarkersInternal(roi)
-            val markerCorners = localMap[i]
-            if (markerCorners != null && markerCorners.size == 4) {
-                val fullCorners = markerCorners.map { PointF(it.x + left, it.y + top) }
-                result[i] = fullCorners
+                val roi = Mat(gray, Rect(left, top, w, h))
+                val localMap = try {
+                    detectArUcoMarkersInGray(roi)
+                } finally {
+                    roi.release()
+                }
+                val markerCorners = localMap[i]
+                if (markerCorners != null && markerCorners.size == 4) {
+                    result[i] = markerCorners.map { PointF(it.x + left, it.y + top) }
+                }
             }
-            roi.recycle()
+            return result
+        } finally {
+            gray.release()
         }
-        return result
     }
 
-    // Internal ArUco detector (ROI or full)
-    private fun detectArUcoMarkersInternal(bitmap: Bitmap): Map<Int, List<PointF>> {
+    // ─── Bitmap‑based full‑frame (legacy fallback) ──────────────
+
+    private fun bitmapToGrayMat(bitmap: Bitmap): Mat {
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
         val gray = Mat()
@@ -65,45 +223,22 @@ object CardDetector {
             1 -> src.copyTo(gray)
             3 -> Imgproc.cvtColor(src, gray, Imgproc.COLOR_BGR2GRAY)
             4 -> Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY)
-            else -> { src.release(); return emptyMap() }
+            else -> { src.release(); return gray }
         }
         src.release()
-
-        val params = DetectorParameters.create()
-        params.set_adaptiveThreshWinSizeMin(3)
-        params.set_adaptiveThreshWinSizeMax(31)
-        params.set_adaptiveThreshWinSizeStep(4)
-        params.set_polygonalApproxAccuracyRate(0.12)
-        params.set_minCornerDistanceRate(0.01)
-        params.set_minMarkerPerimeterRate(0.005)
-        params.set_minMarkerDistanceRate(0.01)
-        params.set_perspectiveRemovePixelPerCell(2)
-        params.set_perspectiveRemoveIgnoredMarginPerCell(0.2)
-
-        val dictionary = Aruco.getPredefinedDictionary(ARUCO_DICT_ID)
-        val corners = ArrayList<Mat>()
-        val ids = Mat()
-        Aruco.detectMarkers(gray, dictionary, corners, ids, params)
-
-        val result = mutableMapOf<Int, List<PointF>>()
-        for (i in 0 until ids.rows()) {
-            val id = ids.get(i, 0)[0].toInt()
-            val cornerMat = corners[i]
-            val pts = (0..3).map { j ->
-                PointF(cornerMat.get(0, j)[0].toFloat(), cornerMat.get(0, j)[1].toFloat())
-            }
-            result[id] = pts
-        }
-        gray.release()
-        return result
+        return gray
     }
 
-    // ─── Full‑frame ArUco detection (fallback) ──────────────────
+    fun detectArUcoMarkersFull(bitmap: Bitmap): Map<Int, List<PointF>> {
+        val gray = bitmapToGrayMat(bitmap)
+        return try {
+            detectArUcoMarkersInGray(gray)
+        } finally {
+            gray.release()
+        }
+    }
 
-    fun detectArUcoMarkersFull(bitmap: Bitmap): Map<Int, List<PointF>> =
-        detectArUcoMarkersInternal(bitmap)
-
-    // ─── Build homography from ArUco ─────────────────────────────
+    // ─── Homography builder (for all 4 markers) ──────────────────
 
     fun buildHomographyFromArUco(arUcoResult: Map<Int, List<PointF>>): Matrix? {
         if (arUcoResult.size < 4) return null
@@ -151,7 +286,7 @@ object CardDetector {
         return matrix
     }
 
-    // ─── Centroid fallback (fast) ──────────────────────────────
+    // ─── Centroid fallback (legacy) ──────────────────────────────
 
     private const val MARKER_SEARCH_MARGIN_PX = 60
     private const val MARKER_DARKNESS_THRESHOLD = 70
@@ -161,6 +296,7 @@ object CardDetector {
         bitmap: Bitmap,
         predictedPositions: List<PointF>
     ): List<PointF?> {
+        // ... (kept as in your original code – not used in fast path)
         val results = mutableListOf<PointF?>()
         for (pred in predictedPositions) {
             val left = (pred.x - MARKER_SEARCH_MARGIN_PX).toInt().coerceIn(0, bitmap.width - 1)
@@ -169,35 +305,25 @@ object CardDetector {
             val bottom = (pred.y + MARKER_SEARCH_MARGIN_PX).toInt().coerceIn(0, bitmap.height - 1)
             val w = right - left
             val h = bottom - top
-            if (w <= 0 || h <= 0) {
-                results.add(null)
-                continue
-            }
+            if (w <= 0 || h <= 0) { results.add(null); continue }
             val pixels = IntArray(w * h)
             bitmap.getPixels(pixels, 0, w, left, top, w, h)
-            var sumX = 0.0
-            var sumY = 0.0
-            var count = 0
+            var sumX = 0.0; var sumY = 0.0; var count = 0
             for (y in 0 until h) {
                 for (x in 0 until w) {
-                    val gray = android.graphics.Color.red(pixels[y * w + x])
-                    if (gray < MARKER_DARKNESS_THRESHOLD) {
-                        sumX += x
-                        sumY += y
-                        count++
+                    if (android.graphics.Color.red(pixels[y * w + x]) < MARKER_DARKNESS_THRESHOLD) {
+                        sumX += x; sumY += y; count++
                     }
                 }
             }
-            if (count < MARKER_MIN_DARK_PIXELS) {
-                results.add(null)
-            } else {
-                results.add(PointF((left + sumX / count).toFloat(), (top + sumY / count).toFloat()))
-            }
+            results.add(if (count >= MARKER_MIN_DARK_PIXELS)
+                PointF((left + sumX / count).toFloat(), (top + sumY / count).toFloat())
+            else null)
         }
         return results
     }
 
-    // ─── Main homography computation ─────────────────────────────
+    // ─── Main homography computation (QR + markers) ─────────────
 
     fun computeHomographyWithMarkers(
         bitmap: Bitmap,
@@ -208,7 +334,6 @@ object CardDetector {
 
         val qrHomography = HomographySolver.solve(template.qrRefCorners, qrCorners) ?: return null
 
-        // 1. Try guided ArUco
         var arUcoMap = detectArUcoMarkersGuided(bitmap, qrCorners, template)
         if (arUcoMap.size < 4) {
             Log.d(TAG, "Guided ArUco found ${arUcoMap.size}, trying full‑frame")
@@ -227,7 +352,7 @@ object CardDetector {
             }
         }
 
-        // 2. Use centres from ArUco (if at least 2) with QR for robust refinement
+        // Fallback: robust refinement with centroids + QR
         val markerRefs = template.markerRefPositions ?: Templates.SHARED_MARKER_CENTRES
         val templatePts = mutableListOf<PointF>()
         val imagePts = mutableListOf<PointF>()
@@ -242,8 +367,6 @@ object CardDetector {
                 foundMarkers++
             }
         }
-
-        // If not enough ArUco, fallback to centroid
         if (foundMarkers < 2) {
             Log.d(TAG, "ArUco found only $foundMarkers, using centroid")
             val predicted = predictImagePoints(markerRefs, qrHomography)
@@ -257,7 +380,6 @@ object CardDetector {
                 }
             }
         }
-
         if (templatePts.size >= 2) {
             templatePts.addAll(template.qrRefCorners)
             imagePts.addAll(qrCorners)
@@ -265,12 +387,9 @@ object CardDetector {
             if (refined != null) return refined
         }
 
-        // 3. QR‑only fallback
         Log.d(TAG, "Using QR‑only homography")
         return Pair(qrHomography, 12f)
     }
-
-    // ─── Robust homography refinement ───────────────────────────
 
     private fun computeRobustHomography(
         templatePoints: List<PointF>,
@@ -299,63 +418,52 @@ object CardDetector {
         return Pair(homography, meanErr)
     }
 
-    // ─── Predict image points ──────────────────────────────────
-
     fun predictImagePoints(templatePoints: List<PointF>, homography: Matrix): List<PointF> {
         val srcArr = FloatArray(templatePoints.size * 2)
         templatePoints.forEachIndexed { i, pt ->
-            srcArr[i * 2] = pt.x
-            srcArr[i * 2 + 1] = pt.y
+            srcArr[i * 2] = pt.x; srcArr[i * 2 + 1] = pt.y
         }
         val dstArr = FloatArray(srcArr.size)
         homography.mapPoints(dstArr, srcArr)
-        return templatePoints.indices.map { i ->
-            PointF(dstArr[i * 2], dstArr[i * 2 + 1])
-        }
+        return templatePoints.indices.map { i -> PointF(dstArr[i * 2], dstArr[i * 2 + 1]) }
     }
 
-    // ─── Edge‑based card corner detection (fallback) ──────────
+    // ─── Edge‑based card corner (fallback) ──────────────────────
 
     private const val MIN_AREA = 15000
     private const val MAX_AREA_RATIO = 0.85
     private const val EPSILON_FACTOR = 0.02
 
     fun detectCardCorners(bitmap: Bitmap): List<PointF>? {
+        // ... (keep your existing implementation)
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
         if (src.empty()) return null
-
         val gray = Mat()
         Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGB2GRAY)
         val blurred = Mat()
         Imgproc.GaussianBlur(gray, blurred, Size(5.0, 5.0), 0.0)
         val edges = Mat()
         Imgproc.Canny(blurred, edges, 50.0, 150.0)
-
         val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
         val dilated = Mat()
         Imgproc.dilate(edges, dilated, kernel)
         kernel.release()
-
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
         Imgproc.findContours(dilated, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-
         val imgArea = src.width() * src.height()
         var bestContour2f: MatOfPoint2f? = null
         var maxArea = 0.0
-
         for (contour in contours) {
             val area = Imgproc.contourArea(contour)
             if (area < MIN_AREA || area > imgArea * MAX_AREA_RATIO) continue
-
             val contour2f = MatOfPoint2f()
             contour2f.fromArray(*contour.toArray())
             val peri = Imgproc.arcLength(contour2f, true)
             val approx = MatOfPoint2f()
             Imgproc.approxPolyDP(contour2f, approx, peri * EPSILON_FACTOR, true)
             contour2f.release()
-
             if (approx.rows() == 4 && area > maxArea) {
                 maxArea = area
                 bestContour2f = MatOfPoint2f()
@@ -363,27 +471,24 @@ object CardDetector {
             }
             approx.release()
         }
-
         src.release(); gray.release(); blurred.release(); edges.release(); dilated.release(); hierarchy.release()
         contours.forEach { it.release() }
-
         bestContour2f ?: return null
         val points = bestContour2f!!.toArray().map { PointF(it.x.toFloat(), it.y.toFloat()) }
         bestContour2f!!.release()
         if (points.size != 4) return null
-
         val tl = points.minByOrNull { it.x + it.y }!!
         val br = points.maxByOrNull { it.x + it.y }!!
         val remaining = points.filter { it != tl && it != br }
         val tr = remaining.minByOrNull { it.x - it.y }!!
         val bl = remaining.maxByOrNull { it.x - it.y }!!
-
         return listOf(tl, tr, br, bl)
     }
 
     // ─── Homography Solver ──────────────────────────────────────
 
     object HomographySolver {
+        // ... (keep your existing implementation – unchanged)
         fun solve(src: List<PointF>, dst: List<PointF>): Matrix? {
             if (src.size != dst.size || src.size < 4) return null
             val (srcNorm, tSrc) = normalizePoints(src) ?: return null
@@ -420,8 +525,7 @@ object CardDetector {
         fun reprojectionErrors(homography: Matrix, templatePoints: List<PointF>, imagePoints: List<PointF>): List<Float> {
             val srcArr = FloatArray(templatePoints.size * 2)
             templatePoints.forEachIndexed { i, pt ->
-                srcArr[i * 2] = pt.x
-                srcArr[i * 2 + 1] = pt.y
+                srcArr[i * 2] = pt.x; srcArr[i * 2 + 1] = pt.y
             }
             val dstArr = FloatArray(srcArr.size)
             homography.mapPoints(dstArr, srcArr)

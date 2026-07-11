@@ -29,11 +29,24 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
+import org.opencv.core.CvType
+import org.opencv.core.Mat
 import org.openscanvision.omr.CardDetector
 import org.openscanvision.ui.components.StaticViewfinder
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 private const val TAG = "ArUcoScanner"
+
+// How many consecutive frames tracking is allowed to find nothing before
+// we pay for a reacquire scan. Keeps steady-state cost low (small ROIs
+// only) while still recovering quickly from lost track.
+private const val MAX_FRAMES_BEFORE_RESCAN = 8
+private const val TRACK_HALF_SIZE_PX = 70
+private const val REACQUIRE_DOWNSCALE = 0.5
+// Smoothing applied only to what's drawn on screen (not to the positions
+// fed back into tracking/search), to cut jitter without adding search lag.
+private const val DISPLAY_SMOOTHING_ALPHA = 0.55f
 
 // ─── Helper functions (copied from ui.utils to avoid imports) ──
 
@@ -52,11 +65,6 @@ private fun mapBitmapPointsToSensor(
     rotationDegrees: Int
 ): List<PointF> {
     if (rotationDegrees % 360 == 0) return points
-    // Standard clockwise-rotation point transform (matches how ImageInfo.rotationDegrees
-    // is defined: degrees to rotate the buffer clockwise to appear upright).
-    //   90°:  new image is (H x W). x' = H - y,        y' = x
-    //   180°: new image is (W x H). x' = W - x,        y' = H - y
-    //   270°: new image is (H x W). x' = y,             y' = W - x
     return when (rotationDegrees) {
         90 -> points.map { PointF(sensorHeight - it.y, it.x) }
         180 -> points.map { PointF(sensorWidth - it.x, sensorHeight - it.y) }
@@ -67,16 +75,9 @@ private fun mapBitmapPointsToSensor(
 
 /**
  * Maps points from a rotation-corrected analysis frame (frameWidth x frameHeight)
- * into PreviewView screen coordinates.
- *
- * This replicates PreviewView's default FILL_CENTER scaleType: uniform scale
- * (never stretched) that covers the view, then center-cropped. If your
- * PreviewView explicitly uses FIT_CENTER instead, change maxOf(...) to minOf(...).
- *
- * This is still an approximation. For pixel-perfect mapping in production,
- * prefer CameraX's androidx.camera.view.transform.OutputTransform +
- * CoordinateTransform, driven off a UseCaseGroup-bound ViewPort (see startCamera()
- * below) so Preview and ImageAnalysis observe identical crop rectangles.
+ * into PreviewView screen coordinates. Replicates PreviewView's default
+ * FILL_CENTER scaleType (uniform scale, center-crop). Switch maxOf -> minOf
+ * if you've explicitly set FIT_CENTER.
  */
 private fun mapImageToScreen(
     points: List<Offset>,
@@ -95,6 +96,56 @@ private fun mapImageToScreen(
     val offsetY = (viewHeight - scaledH) / 2f
 
     return points.map { Offset(it.x * scale + offsetX, it.y * scale + offsetY) }
+}
+
+/**
+ * Builds a single-channel grayscale OpenCV Mat directly from the Y-plane
+ * of a YUV_420_888 ImageProxy. This is the fast path: it skips YUV->RGB
+ * conversion, a Bitmap allocation, and the extra color-conversion that
+ * CardDetector's Bitmap-based functions would otherwise redo internally.
+ * ArUco detection only ever needs luma, so this is the entire input it needs.
+ *
+ * Caller owns the returned Mat and must release() it.
+ */
+private fun yPlaneToGrayMat(imageProxy: ImageProxy): Mat {
+    val yPlane = imageProxy.planes[0]
+    val buffer: ByteBuffer = yPlane.buffer
+    val rowStride = yPlane.rowStride
+    val pixelStride = yPlane.pixelStride
+    val width = imageProxy.width
+    val height = imageProxy.height
+
+    val mat = Mat(height, width, CvType.CV_8UC1)
+
+    if (pixelStride == 1 && rowStride == width) {
+        // Fully contiguous — single bulk copy.
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        mat.put(0, 0, bytes)
+    } else if (pixelStride == 1) {
+        // Row-padded (rowStride > width) but pixels within a row are contiguous.
+        val rowBytes = ByteArray(width)
+        for (row in 0 until height) {
+            buffer.position(row * rowStride)
+            buffer.get(rowBytes, 0, width)
+            mat.put(row, 0, rowBytes)
+        }
+    } else {
+        // Rare: non-unit pixel stride within the Y plane. Fall back to a
+        // per-pixel strided copy (still avoids full YUV->RGB conversion).
+        val rowBytes = ByteArray(rowStride)
+        val outRow = ByteArray(width)
+        for (row in 0 until height) {
+            buffer.position(row * rowStride)
+            val remaining = buffer.remaining().coerceAtMost(rowStride)
+            buffer.get(rowBytes, 0, remaining)
+            for (col in 0 until width) {
+                outRow[col] = rowBytes[col * pixelStride]
+            }
+            mat.put(row, 0, outRow)
+        }
+    }
+    return mat
 }
 
 // ─── Composable ──────────────────────────────────────────────────
@@ -124,11 +175,17 @@ fun ScannerScreen() {
 
     val previewView = remember { PreviewView(context) }
     var cameraError by remember { mutableStateOf<String?>(null) }
-    // Tracks whether previewView has completed at least one layout pass,
-    // which is required before previewView.width/height/viewPort are valid.
     var previewLaidOut by remember { mutableStateOf(false) }
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    // Analyzer-thread-only state (NOT Compose state — mutated and read
+    // exclusively on cameraExecutor, so no recomposition/allocation cost
+    // per frame just for tracking bookkeeping).
+    val lastKnownCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }       // this frame's raw centres
+    val previousCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }        // prior frame's raw centres (for velocity)
+    val smoothedMarkersRef = remember { arrayOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) } // EMA'd, screen-space
+    val framesSinceFullScanRef = remember { intArrayOf(MAX_FRAMES_BEFORE_RESCAN) } // force scan on first frame
 
     DisposableEffect(Unit) {
         onDispose {
@@ -137,7 +194,7 @@ fun ScannerScreen() {
     }
 
     DisposableEffect(previewView) {
-        val listener = android.view.View.OnLayoutChangeListener { _, _, _, _, _, oldL, oldT, oldR, oldB ->
+        val listener = android.view.View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             if (!previewLaidOut && previewView.width > 0 && previewView.height > 0) {
                 previewLaidOut = true
             }
@@ -170,31 +227,71 @@ fun ScannerScreen() {
                         imageProxy.close()
                         return@setAnalyzer
                     }
-                    val bitmap = imageProxy.toBitmap()
-                    if (bitmap == null) {
-                        imageProxy.close()
-                        return@setAnalyzer
-                    }
 
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     val bufferWidth = imageProxy.width.toFloat()
                     val bufferHeight = imageProxy.height.toFloat()
-
-                    // Dimensions AFTER rotation is applied — swapped for 90/270.
                     val rotatedWidth = if (rotationDegrees % 180 == 0) bufferWidth else bufferHeight
                     val rotatedHeight = if (rotationDegrees % 180 == 0) bufferHeight else bufferWidth
 
-                    // Detect ArUco markers in raw buffer space
-                    val arUcoMap = CardDetector.detectArUcoMarkersFull(bitmap)
-                    Log.d(TAG, "Detected ${arUcoMap.size} markers")
+                    // Fast path: grayscale Mat straight from the Y-plane, no Bitmap.
+                    val gray = yPlaneToGrayMat(imageProxy)
 
-                    val screenMarkers = mutableMapOf<Int, Pair<Offset, List<Offset>>>()
+                    val arUcoMap: Map<Int, List<PointF>>
+                    try {
+                        val lastCentres = lastKnownCentresRef[0]
+                        val prevCentres = previousCentresRef[0]
+                        val needsReacquire = lastCentres.isEmpty() ||
+                                framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
+
+                        arUcoMap = if (!needsReacquire) {
+                            // Predict where each marker will be this frame using simple
+                            // constant-velocity extrapolation from the last two observed
+                            // positions. This keeps the search ROI centered on fast-moving
+                            // markers instead of always lagging one frame behind, so we can
+                            // afford a smaller (cheaper) ROI while tracking more reliably.
+                            val predictedCentres = lastCentres.mapValues { (id, centre) ->
+                                val prev = prevCentres[id]
+                                if (prev != null) {
+                                    PointF(centre.x + (centre.x - prev.x), centre.y + (centre.y - prev.y))
+                                } else {
+                                    centre
+                                }
+                            }
+                            val tracked = CardDetector.detectArUcoMarkersTrackedInGray(
+                                gray, predictedCentres, TRACK_HALF_SIZE_PX
+                            )
+                            if (tracked.size < lastCentres.size) {
+                                // Lost one or more markers this frame — force a reacquire
+                                // next frame instead of drifting silently.
+                                framesSinceFullScanRef[0] = MAX_FRAMES_BEFORE_RESCAN
+                            } else {
+                                framesSinceFullScanRef[0]++
+                            }
+                            tracked
+                        } else {
+                            // Coarse-to-fine reacquire: cheap downscaled full-frame
+                            // localization + full-res sub-pixel refine per hit. Faster
+                            // AND more accurate than a single full-res pass.
+                            val reacquired = CardDetector.detectArUcoMarkersReacquire(gray, REACQUIRE_DOWNSCALE)
+                            framesSinceFullScanRef[0] = 0
+                            reacquired
+                        }
+                    } finally {
+                        gray.release()
+                    }
+
+                    // Shift tracking state for next frame's velocity estimate.
+                    previousCentresRef[0] = lastKnownCentresRef[0]
+                    lastKnownCentresRef[0] = arUcoMap.mapValues { (_, corners) ->
+                        PointF(corners.map { it.x }.average().toFloat(), corners.map { it.y }.average().toFloat())
+                    }
+
+                    // Map corners to screen coordinates (raw, unsmoothed — this is what
+                    // feeds next frame's search, so it must reflect the true detection).
+                    val rawScreenMarkers = mutableMapOf<Int, Pair<Offset, List<Offset>>>()
                     for ((id, corners) in arUcoMap) {
-                        // Buffer space -> rotation-corrected "upright" space
-                        val sensorCorners = mapBitmapPointsToSensor(
-                            corners, bufferWidth, bufferHeight, rotationDegrees
-                        )
-                        // Upright space -> PreviewView screen space
+                        val sensorCorners = mapBitmapPointsToSensor(corners, bufferWidth, bufferHeight, rotationDegrees)
                         val screenCorners = mapImageToScreen(
                             sensorCorners.map { point -> Offset(point.x, point.y) },
                             rotatedWidth,
@@ -204,23 +301,45 @@ fun ScannerScreen() {
                         if (screenCorners != null && screenCorners.size == 4) {
                             val centreX = screenCorners.map { it.x }.average().toFloat()
                             val centreY = screenCorners.map { it.y }.average().toFloat()
-                            val centre = Offset(centreX, centreY)
-                            screenMarkers[id] = Pair(centre, screenCorners)
+                            rawScreenMarkers[id] = Pair(Offset(centreX, centreY), screenCorners)
                         }
                     }
 
+                    // Exponential moving average purely for display — cuts visual jitter
+                    // from per-frame corner noise without adding lag to the actual
+                    // tracking/search logic above, which always uses raw detections.
+                    val prevSmoothed = smoothedMarkersRef[0]
+                    val smoothed = rawScreenMarkers.mapValues { (id, raw) ->
+                        val prev = prevSmoothed[id]
+                        if (prev == null) {
+                            raw
+                        } else {
+                            val (rawCentre, rawCorners) = raw
+                            val (prevCentre, prevCorners) = prev
+                            val a = DISPLAY_SMOOTHING_ALPHA
+                            val newCentre = Offset(
+                                prevCentre.x + a * (rawCentre.x - prevCentre.x),
+                                prevCentre.y + a * (rawCentre.y - prevCentre.y)
+                            )
+                            val newCorners = rawCorners.indices.map { i ->
+                                Offset(
+                                    prevCorners[i].x + a * (rawCorners[i].x - prevCorners[i].x),
+                                    prevCorners[i].y + a * (rawCorners[i].y - prevCorners[i].y)
+                                )
+                            }
+                            Pair(newCentre, newCorners)
+                        }
+                    }
+                    smoothedMarkersRef[0] = smoothed
+
                     coroutineScope.launch(Dispatchers.Main) {
-                        detectedMarkers = screenMarkers
-                        isTracking = screenMarkers.isNotEmpty()
+                        detectedMarkers = smoothed
+                        isTracking = smoothed.isNotEmpty()
                     }
 
                     imageProxy.close()
                 }
 
-                // Shared ViewPort so Preview and ImageAnalysis crop the sensor
-                // identically. Without this, the two streams can show/analyze
-                // different regions of the sensor even after the math above
-                // is correct, causing a residual, hard-to-diagnose offset.
                 val existingViewPort = previewView.viewPort
                 val viewPort = existingViewPort ?: run {
                     val w = previewView.width
@@ -246,9 +365,6 @@ fun ScannerScreen() {
                         lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup
                     )
                 } else {
-                    // Fallback: previewView hasn't laid out yet. Bind without a
-                    // ViewPort so something is on screen, but coordinate mapping
-                    // may be slightly off until the next recompose/restart after layout.
                     Log.w(TAG, "PreviewView not laid out yet, binding without ViewPort")
                     cameraProvider.bindToLifecycle(
                         lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
@@ -280,7 +396,6 @@ fun ScannerScreen() {
             markers.forEach { (id, data) ->
                 val (centre, corners) = data
 
-                // Draw marker outline (green polygon)
                 val path = Path().apply {
                     moveTo(corners[0].x, corners[0].y)
                     lineTo(corners[1].x, corners[1].y)
@@ -294,14 +409,12 @@ fun ScannerScreen() {
                     style = Stroke(width = 4f)
                 )
 
-                // Draw centre dot (red)
                 drawCircle(
                     center = centre,
                     radius = 8f,
                     color = Color.Red
                 )
 
-                // Draw ID and coordinates (white text with shadow)
                 val text = "ID: $id  X: ${centre.x.toInt()}  Y: ${centre.y.toInt()}"
                 drawContext.canvas.nativeCanvas.apply {
                     val paint = android.graphics.Paint().apply {
@@ -358,7 +471,6 @@ fun ScannerScreen() {
                 StaticViewfinder()
                 ArUcoOverlay(markers = detectedMarkers)
 
-                // Status bar
                 Text(
                     text = if (isTracking) "✅ ${detectedMarkers.size} marker(s) detected" else "❌ No markers",
                     color = if (isTracking) Color.Green else Color.Yellow,
