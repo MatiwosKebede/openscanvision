@@ -2,10 +2,9 @@ package org.openscanvision.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.PointF
 import android.util.Log
-import android.widget.Toast
+import android.util.Rational
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
@@ -38,6 +37,14 @@ private const val TAG = "ArUcoScanner"
 
 // ─── Helper functions (copied from ui.utils to avoid imports) ──
 
+/**
+ * Rotates points from raw buffer space into the "upright" frame that
+ * matches what the user visually sees (i.e. what rotationDegrees corrects for).
+ *
+ * NOTE: for 90/270 the width/height axes swap. Callers must pass the
+ * POST-rotation width/height (not the raw buffer width/height) to any
+ * function that scales these points against a target view.
+ */
 private fun mapBitmapPointsToSensor(
     points: List<PointF>,
     sensorWidth: Float,
@@ -45,29 +52,49 @@ private fun mapBitmapPointsToSensor(
     rotationDegrees: Int
 ): List<PointF> {
     if (rotationDegrees % 360 == 0) return points
+    // Standard clockwise-rotation point transform (matches how ImageInfo.rotationDegrees
+    // is defined: degrees to rotate the buffer clockwise to appear upright).
+    //   90°:  new image is (H x W). x' = H - y,        y' = x
+    //   180°: new image is (W x H). x' = W - x,        y' = H - y
+    //   270°: new image is (H x W). x' = y,             y' = W - x
     return when (rotationDegrees) {
-        90 -> points.map { PointF(it.y, sensorHeight - it.x) }
+        90 -> points.map { PointF(sensorHeight - it.y, it.x) }
         180 -> points.map { PointF(sensorWidth - it.x, sensorHeight - it.y) }
-        270 -> points.map { PointF(sensorWidth - it.y, it.x) }
+        270 -> points.map { PointF(it.y, sensorWidth - it.x) }
         else -> points
     }
 }
 
+/**
+ * Maps points from a rotation-corrected analysis frame (frameWidth x frameHeight)
+ * into PreviewView screen coordinates.
+ *
+ * This replicates PreviewView's default FILL_CENTER scaleType: uniform scale
+ * (never stretched) that covers the view, then center-cropped. If your
+ * PreviewView explicitly uses FIT_CENTER instead, change maxOf(...) to minOf(...).
+ *
+ * This is still an approximation. For pixel-perfect mapping in production,
+ * prefer CameraX's androidx.camera.view.transform.OutputTransform +
+ * CoordinateTransform, driven off a UseCaseGroup-bound ViewPort (see startCamera()
+ * below) so Preview and ImageAnalysis observe identical crop rectangles.
+ */
 private fun mapImageToScreen(
     points: List<Offset>,
-    sensorWidth: Float,
-    sensorHeight: Float,
+    frameWidth: Float,
+    frameHeight: Float,
     previewView: PreviewView
 ): List<Offset>? {
-    // Simple proportional mapping (assumes full screen, no crop)
-    // In your real app, use CameraX's proper coordinate mapping.
-    // This is a placeholder that works for full-screen previews.
     val viewWidth = previewView.width.toFloat()
     val viewHeight = previewView.height.toFloat()
-    if (viewWidth <= 0 || viewHeight <= 0) return null
-    val scaleX = viewWidth / sensorWidth
-    val scaleY = viewHeight / sensorHeight
-    return points.map { Offset(it.x * scaleX, it.y * scaleY) }
+    if (viewWidth <= 0 || viewHeight <= 0 || frameWidth <= 0 || frameHeight <= 0) return null
+
+    val scale = maxOf(viewWidth / frameWidth, viewHeight / frameHeight)
+    val scaledW = frameWidth * scale
+    val scaledH = frameHeight * scale
+    val offsetX = (viewWidth - scaledW) / 2f
+    val offsetY = (viewHeight - scaledH) / 2f
+
+    return points.map { Offset(it.x * scale + offsetX, it.y * scale + offsetY) }
 }
 
 // ─── Composable ──────────────────────────────────────────────────
@@ -97,6 +124,9 @@ fun ScannerScreen() {
 
     val previewView = remember { PreviewView(context) }
     var cameraError by remember { mutableStateOf<String?>(null) }
+    // Tracks whether previewView has completed at least one layout pass,
+    // which is required before previewView.width/height/viewPort are valid.
+    var previewLaidOut by remember { mutableStateOf(false) }
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
@@ -104,6 +134,16 @@ fun ScannerScreen() {
         onDispose {
             cameraExecutor.shutdown()
         }
+    }
+
+    DisposableEffect(previewView) {
+        val listener = android.view.View.OnLayoutChangeListener { _, _, _, _, _, oldL, oldT, oldR, oldB ->
+            if (!previewLaidOut && previewView.width > 0 && previewView.height > 0) {
+                previewLaidOut = true
+            }
+        }
+        previewView.addOnLayoutChangeListener(listener)
+        onDispose { previewView.removeOnLayoutChangeListener(listener) }
     }
 
     // ─── Camera setup ─────────────────────────────────────────────
@@ -125,26 +165,40 @@ fun ScannerScreen() {
                     .build()
 
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    val mediaImage = imageProxy.image ?: run { imageProxy.close(); return@setAnalyzer }
-                    val bitmap = imageProxy.toBitmap() ?: run { imageProxy.close(); return@setAnalyzer }
-                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-                    val sensorWidth = imageProxy.width.toFloat()
-                    val sensorHeight = imageProxy.height.toFloat()
+                    val mediaImage = imageProxy.image
+                    if (mediaImage == null) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
+                    val bitmap = imageProxy.toBitmap()
+                    if (bitmap == null) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
 
-                    // Detect ArUco markers
+                    val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                    val bufferWidth = imageProxy.width.toFloat()
+                    val bufferHeight = imageProxy.height.toFloat()
+
+                    // Dimensions AFTER rotation is applied — swapped for 90/270.
+                    val rotatedWidth = if (rotationDegrees % 180 == 0) bufferWidth else bufferHeight
+                    val rotatedHeight = if (rotationDegrees % 180 == 0) bufferHeight else bufferWidth
+
+                    // Detect ArUco markers in raw buffer space
                     val arUcoMap = CardDetector.detectArUcoMarkersFull(bitmap)
                     Log.d(TAG, "Detected ${arUcoMap.size} markers")
 
-                    // Map corners to screen coordinates
                     val screenMarkers = mutableMapOf<Int, Pair<Offset, List<Offset>>>()
                     for ((id, corners) in arUcoMap) {
-                        // Convert corners from bitmap space to sensor space
-                        val sensorCorners = mapBitmapPointsToSensor(corners, sensorWidth, sensorHeight, rotationDegrees)
-                        // Convert sensor corners to screen coordinates
+                        // Buffer space -> rotation-corrected "upright" space
+                        val sensorCorners = mapBitmapPointsToSensor(
+                            corners, bufferWidth, bufferHeight, rotationDegrees
+                        )
+                        // Upright space -> PreviewView screen space
                         val screenCorners = mapImageToScreen(
                             sensorCorners.map { point -> Offset(point.x, point.y) },
-                            sensorWidth,
-                            sensorHeight,
+                            rotatedWidth,
+                            rotatedHeight,
                             previewView
                         )
                         if (screenCorners != null && screenCorners.size == 4) {
@@ -155,7 +209,6 @@ fun ScannerScreen() {
                         }
                     }
 
-                    // Update UI
                     coroutineScope.launch(Dispatchers.Main) {
                         detectedMarkers = screenMarkers
                         isTracking = screenMarkers.isNotEmpty()
@@ -164,9 +217,44 @@ fun ScannerScreen() {
                     imageProxy.close()
                 }
 
-                cameraProvider.bindToLifecycle(
-                    lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
-                )
+                // Shared ViewPort so Preview and ImageAnalysis crop the sensor
+                // identically. Without this, the two streams can show/analyze
+                // different regions of the sensor even after the math above
+                // is correct, causing a residual, hard-to-diagnose offset.
+                val existingViewPort = previewView.viewPort
+                val viewPort = existingViewPort ?: run {
+                    val w = previewView.width
+                    val h = previewView.height
+                    if (w > 0 && h > 0) {
+                        ViewPort.Builder(
+                            Rational(w, h),
+                            previewView.display?.rotation ?: android.view.Surface.ROTATION_0
+                        ).build()
+                    } else {
+                        null
+                    }
+                }
+
+                if (viewPort != null) {
+                    val useCaseGroup = UseCaseGroup.Builder()
+                        .addUseCase(preview)
+                        .addUseCase(analysis)
+                        .setViewPort(viewPort)
+                        .build()
+
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup
+                    )
+                } else {
+                    // Fallback: previewView hasn't laid out yet. Bind without a
+                    // ViewPort so something is on screen, but coordinate mapping
+                    // may be slightly off until the next recompose/restart after layout.
+                    Log.w(TAG, "PreviewView not laid out yet, binding without ViewPort")
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
+                    )
+                }
+
                 cameraError = null
                 Log.d(TAG, "Camera started")
             } catch (e: Exception) {
@@ -176,8 +264,12 @@ fun ScannerScreen() {
         }, ContextCompat.getMainExecutor(context))
     }
 
-    LaunchedEffect(hasCameraPermission) {
-        if (hasCameraPermission) startCamera() else permissionLauncher.launch(Manifest.permission.CAMERA)
+    LaunchedEffect(hasCameraPermission, previewLaidOut) {
+        if (!hasCameraPermission) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        } else if (previewLaidOut) {
+            startCamera()
+        }
     }
 
     // ─── Live preview overlay ─────────────────────────────────────
