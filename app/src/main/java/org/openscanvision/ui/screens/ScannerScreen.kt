@@ -54,13 +54,13 @@ private const val TAG = "ArUcoScanner"
 
 // ─── Optimised constants ──────────────────────────────────────────
 
-private const val MAX_FRAMES_BEFORE_RESCAN = 20
+private const val MAX_FRAMES_BEFORE_RESCAN = 60
 private const val BASE_TRACK_HALF_SIZE = 55          // reduced from 70
 private const val MIN_TRACK_HALF_SIZE = 30           // reduced from 40
 private const val MAX_TRACK_HALF_SIZE = 100          // reduced from 130
 private const val DISPLAY_SMOOTHING_ALPHA = 0.25f
 private const val CONFIDENCE_THRESHOLD = 5
-private const val CONFIDENCE_DECAY = 0.85f
+private const val CONFIDENCE_DECAY = 0.92f
 private const val PERSISTENCE_FRAMES = 20
 private const val ACCELERATION_NOISE = 0.02f
 
@@ -292,11 +292,12 @@ fun ScannerScreen() {
                 var frameCounter = 0
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                     frameCounter++
-                    // Adaptive frame skip: skip more when stable
+                    // Adaptive frame skip: keep full-rate analysis unless tracking is strongly stable.
+                    val highConfidenceTracked = markerConfidence.count { it.value >= CONFIDENCE_THRESHOLD }
                     val shouldProcess = when {
-                        stableFrameCounter[0] > 20 -> frameCounter % 4 == 0   // very stable: every 4th
-                        stableFrameCounter[0] > 10 -> frameCounter % 3 == 0   // stable: every 3rd
-                        else -> frameCounter % 2 == 0                         // normal: every 2nd
+                        stableFrameCounter[0] > 30 && highConfidenceTracked >= 3 -> frameCounter % 3 == 0
+                        stableFrameCounter[0] > 15 && highConfidenceTracked >= 3 -> frameCounter % 2 == 0
+                        else -> true
                     }
                     if (!shouldProcess) {
                         imageProxy.close()
@@ -389,7 +390,7 @@ fun ScannerScreen() {
                     }
                     for (id in markerConfidence.keys) {
                         if (id !in detectedIds) {
-                            markerConfidence[id] = ((markerConfidence[id] ?: 0) * CONFIDENCE_DECAY).toInt()
+                            markerConfidence[id] = ((markerConfidence[id] ?: 0) * CONFIDENCE_DECAY).toInt().coerceAtLeast(1)
                         }
                     }
                     val toRemove = markerAge.filter { it.value > PERSISTENCE_FRAMES && (markerConfidence[it.key] ?: 0) < 3 }.keys
@@ -404,8 +405,8 @@ fun ScannerScreen() {
                         PointF(corners.map { it.x }.average().toFloat(), corners.map { it.y }.average().toFloat())
                     }
 
-                    val highConf = markerConfidence.filter { it.value >= CONFIDENCE_THRESHOLD }.size
-                    if (highConf >= 3 && arUcoMap.size >= 3) {
+                    val highConfDetected = detectedIds.count { (markerConfidence[it] ?: 0) >= CONFIDENCE_THRESHOLD }
+                    if (highConfDetected >= 3 && arUcoMap.size >= 3) {
                         stableFrameCounter[0]++
                     } else {
                         stableFrameCounter[0] = 0
