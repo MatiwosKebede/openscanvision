@@ -37,6 +37,28 @@ object CardDetector {
         }
     }
 
+    // Tracked profile: used every frame on small ROIs around already-known markers.
+    // Cheaper than accurateParams (fewer sub-pixel iterations, coarser adaptive
+    // threshold sweep) since the ROI is tiny and the marker's rough position is
+    // already known — this is the main per-frame speed lever.
+    private val trackedParams: DetectorParameters by lazy {
+        DetectorParameters.create().apply {
+            set_adaptiveThreshWinSizeMin(3)
+            set_adaptiveThreshWinSizeMax(23)
+            set_adaptiveThreshWinSizeStep(10)
+            set_polygonalApproxAccuracyRate(0.10)
+            set_minCornerDistanceRate(0.01)
+            set_minMarkerPerimeterRate(0.01)
+            set_minMarkerDistanceRate(0.01)
+            set_perspectiveRemovePixelPerCell(3)
+            set_perspectiveRemoveIgnoredMarginPerCell(0.18)
+            set_cornerRefinementMethod(Aruco.CORNER_REFINE_SUBPIX)
+            set_cornerRefinementWinSize(4)
+            set_cornerRefinementMaxIterations(15)
+            set_cornerRefinementMinAccuracy(0.05)
+        }
+    }
+
     // Accurate profile: sub‑pixel refinement (used on ROIs)
     private val accurateParams: DetectorParameters by lazy {
         DetectorParameters.create().apply {
@@ -87,7 +109,8 @@ object CardDetector {
     fun detectArUcoMarkersTrackedInGray(
         gray: Mat,
         searchCentres: Map<Int, PointF>,
-        halfSize: Int = 75
+        halfSize: Int = 75,
+        params: DetectorParameters = trackedParams
     ): Map<Int, List<PointF>> {
         if (searchCentres.isEmpty()) return emptyMap()
         val result = mutableMapOf<Int, List<PointF>>()
@@ -105,7 +128,7 @@ object CardDetector {
 
             val roi = Mat(gray, Rect(left, top, w, h))
             val localMap = try {
-                detectArUcoMarkersInGray(roi, accurateParams)
+                detectArUcoMarkersInGray(roi, params)
             } finally {
                 roi.release()
             }
