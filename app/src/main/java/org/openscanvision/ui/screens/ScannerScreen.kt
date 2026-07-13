@@ -2,6 +2,11 @@ package org.openscanvision.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Color as AndroidColor
+import android.graphics.Paint as AndroidPaint
+import android.graphics.Path as AndroidPath
 import android.graphics.PointF
 import android.util.Log
 import android.util.Rational
@@ -11,7 +16,10 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -32,9 +41,13 @@ import kotlinx.coroutines.*
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.openscanvision.omr.CardDetector
+import org.openscanvision.omr.ImagePreprocessor
 import org.openscanvision.omr.Templates
+import org.openscanvision.omr.OpenCVUtils
+import org.openscanvision.omr.toBitmap
 import org.openscanvision.ui.components.StaticViewfinder
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 
 private const val TAG = "ArUcoScanner"
@@ -163,6 +176,43 @@ private fun yPlaneToGrayMat(imageProxy: ImageProxy): Mat {
     return mat
 }
 
+private fun cardCornersFromArUco(arUcoMap: Map<Int, List<PointF>>): List<PointF>? {
+    val homography = CardDetector.buildHomographyFromArUco(arUcoMap) ?: return null
+    val templateCardCorners = listOf(
+        PointF(0f, 0f),
+        PointF((Templates.REF_WIDTH - 1).toFloat(), 0f),
+        PointF((Templates.REF_WIDTH - 1).toFloat(), (Templates.REF_HEIGHT - 1).toFloat()),
+        PointF(0f, (Templates.REF_HEIGHT - 1).toFloat())
+    )
+    return CardDetector.predictImagePoints(templateCardCorners, homography)
+}
+
+private fun drawOverlayCardBitmap(source: Bitmap, cardCorners: List<PointF>): Bitmap {
+    val mutable = source.copy(Bitmap.Config.ARGB_8888, true)
+    val canvas = AndroidCanvas(mutable)
+    val strokePaint = AndroidPaint().apply {
+        color = AndroidColor.GREEN
+        style = AndroidPaint.Style.STROKE
+        strokeWidth = 8f
+        isAntiAlias = true
+    }
+    val pointPaint = AndroidPaint().apply {
+        color = AndroidColor.GREEN
+        style = AndroidPaint.Style.FILL
+        isAntiAlias = true
+    }
+    val path = AndroidPath().apply {
+        moveTo(cardCorners[0].x, cardCorners[0].y)
+        lineTo(cardCorners[1].x, cardCorners[1].y)
+        lineTo(cardCorners[2].x, cardCorners[2].y)
+        lineTo(cardCorners[3].x, cardCorners[3].y)
+        close()
+    }
+    canvas.drawPath(path, strokePaint)
+    cardCorners.forEach { canvas.drawCircle(it.x, it.y, 9f, pointPaint) }
+    return mutable
+}
+
 // ─── Composable ──────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -185,6 +235,10 @@ fun ScannerScreen() {
     // UI state
     var detectedMarkers by remember { mutableStateOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) }
     var isTracking by remember { mutableStateOf(false) }
+    var overlayCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var transformedCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var captureStatus by remember { mutableStateOf("Tap Capture Preview to generate side-by-side card images.") }
+    val captureRequestedRef = remember { AtomicBoolean(false) }
 
     val previewView = remember { PreviewView(context) }
     var cameraError by remember { mutableStateOf<String?>(null) }
@@ -403,6 +457,44 @@ fun ScannerScreen() {
                         isTracking = smoothed.isNotEmpty()
                     }
 
+                    if (captureRequestedRef.compareAndSet(true, false)) {
+                        val frameBitmap = imageProxy.toBitmap()
+                        if (frameBitmap == null) {
+                            coroutineScope.launch(Dispatchers.Main) {
+                                captureStatus = "Capture failed: frame conversion failed."
+                            }
+                        } else {
+                            val cardCorners = cardCornersFromArUco(arUcoMap) ?: CardDetector.detectCardCorners(frameBitmap)
+                            if (cardCorners == null || cardCorners.size != 4) {
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    captureStatus = "Capture failed: unable to estimate full card shape."
+                                }
+                            } else {
+                                val overlayBitmap = drawOverlayCardBitmap(frameBitmap, cardCorners)
+                                val warped = OpenCVUtils.warpCard(
+                                    frameBitmap,
+                                    cardCorners,
+                                    Templates.REF_WIDTH,
+                                    Templates.REF_HEIGHT
+                                )
+                                val standardized = warped?.let { warpedBitmap ->
+                                    val contrasted = ImagePreprocessor.enhanceContrast(warpedBitmap)
+                                    ImagePreprocessor.denoise(contrasted)
+                                }
+
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    overlayCaptureBitmap = overlayBitmap
+                                    transformedCaptureBitmap = standardized ?: warped
+                                    captureStatus = if (standardized != null || warped != null) {
+                                        "✅ Captured original overlay + perspective standardized card."
+                                    } else {
+                                        "Capture failed: perspective transform could not be generated."
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     imageProxy.close()
                 }
 
@@ -533,17 +625,69 @@ fun ScannerScreen() {
                 StaticViewfinder()
                 ArUcoOverlay(markers = detectedMarkers)
 
-                Text(
-                    text = if (isTracking) "✅ ${detectedMarkers.size} marker(s) detected" else "❌ No markers",
-                    color = if (isTracking) Color.Green else Color.Yellow,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
+                Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(16.dp)
-                        .background(Color.Black.copy(alpha = 0.6f), shape = MaterialTheme.shapes.small)
-                        .padding(8.dp)
-                )
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = if (isTracking) "✅ ${detectedMarkers.size} marker(s) detected" else "❌ No markers",
+                        color = if (isTracking) Color.Green else Color.Yellow,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.6f), shape = MaterialTheme.shapes.small)
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            if (isTracking) {
+                                captureStatus = "Capturing..."
+                                captureRequestedRef.set(true)
+                            } else {
+                                captureStatus = "Hold the card steady first, then capture."
+                            }
+                        }
+                    ) { Text("Capture Preview") }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = captureStatus,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.55f), shape = MaterialTheme.shapes.small)
+                            .padding(8.dp)
+                    )
+                    if (overlayCaptureBitmap != null && transformedCaptureBitmap != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Image(
+                                bitmap = overlayCaptureBitmap!!.asImageBitmap(),
+                                contentDescription = "Original with overlay",
+                                modifier = Modifier
+                                    .size(width = 220.dp, height = 140.dp)
+                                    .background(Color.Black)
+                            )
+                            Image(
+                                bitmap = transformedCaptureBitmap!!.asImageBitmap(),
+                                contentDescription = "Perspective transformed",
+                                modifier = Modifier
+                                    .size(width = 220.dp, height = 140.dp)
+                                    .background(Color.Black)
+                            )
+                        }
+                    }
+                }
             }
         }
     }
