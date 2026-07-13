@@ -60,17 +60,23 @@ private const val TAG = "ArUcoScanner"
 
 // ─── Optimised constants ──────────────────────────────────────────
 
-private const val MAX_FRAMES_BEFORE_RESCAN = 60
+private const val MAX_FRAMES_BEFORE_RESCAN = 120
+private const val LOW_CONF_FRAMES_BEFORE_RESCAN = 10
 private const val BASE_TRACK_HALF_SIZE = 55          // reduced from 70
 private const val MIN_TRACK_HALF_SIZE = 30           // reduced from 40
 private const val MAX_TRACK_HALF_SIZE = 100          // reduced from 130
 private const val DISPLAY_SMOOTHING_ALPHA = 0.25f
 private const val CONFIDENCE_THRESHOLD = 5
+private const val MIN_CAPTURE_HIGH_CONF_MARKERS = 3
+private const val MIN_CAPTURE_AVG_CONF = 6f
+private const val MAX_CAPTURE_HOMOGRAPHY_ERROR_PX = 9f
+private const val MAX_MARKER_AREA_RATIO = 3.0f
 private const val CONFIDENCE_DECAY = 0.92f
 private const val PERSISTENCE_FRAMES = 20
 private const val ACCELERATION_NOISE = 0.02f
-private const val AUTO_CAPTURE_STABLE_FRAMES = 18
-private const val AUTO_CAPTURE_COOLDOWN_FRAMES = 45
+private const val AUTO_CAPTURE_STABLE_FRAMES = 12
+private const val AUTO_CAPTURE_COOLDOWN_FRAMES = 20
+private const val QUICK_RETRY_DELAY_FRAMES = 8
 
 // ─── Constant‑acceleration Kalman filter ────────────────────────
 
@@ -195,6 +201,65 @@ private fun cardCornersFromArUco(arUcoMap: Map<Int, List<PointF>>): List<PointF>
     return CardDetector.predictImagePoints(templateCardCorners, homography)
 }
 
+private data class CaptureMetrics(
+    var attempts: Int = 0,
+    var successes: Int = 0,
+    var qualityRejects: Int = 0,
+    var totalLockFrames: Long = 0L,
+    var totalTimeToCaptureMs: Long = 0L
+)
+
+private data class CaptureValidation(
+    val accepted: Boolean,
+    val reason: String,
+    val homographyErrorPx: Float
+)
+
+private fun markerArea(corners: List<PointF>): Float {
+    if (corners.size != 4) return 0f
+    var area = 0f
+    for (i in corners.indices) {
+        val next = corners[(i + 1) % corners.size]
+        area += corners[i].x * next.y - next.x * corners[i].y
+    }
+    return kotlin.math.abs(area) * 0.5f
+}
+
+private fun validateCaptureQuality(
+    arUcoMap: Map<Int, List<PointF>>,
+    markerConfidence: Map<Int, Int>
+): CaptureValidation {
+    val highConfMarkers = arUcoMap.keys.count { (markerConfidence[it] ?: 0) >= CONFIDENCE_THRESHOLD }
+    if (highConfMarkers < MIN_CAPTURE_HIGH_CONF_MARKERS) {
+        return CaptureValidation(false, "Quality low: insufficient stable markers.", Float.MAX_VALUE)
+    }
+
+    val avgConfidence = if (arUcoMap.isNotEmpty()) {
+        arUcoMap.keys.map { markerConfidence[it] ?: 0 }.average().toFloat()
+    } else {
+        0f
+    }
+    if (avgConfidence < MIN_CAPTURE_AVG_CONF) {
+        return CaptureValidation(false, "Quality low: marker confidence too low.", Float.MAX_VALUE)
+    }
+
+    val areas = arUcoMap.values.map(::markerArea).filter { it > 1f }
+    if (areas.size >= 2) {
+        val minArea = areas.minOrNull() ?: 0f
+        val maxArea = areas.maxOrNull() ?: 0f
+        if (minArea <= 0f || maxArea / minArea > MAX_MARKER_AREA_RATIO) {
+            return CaptureValidation(false, "Quality low: marker consistency check failed.", Float.MAX_VALUE)
+        }
+    }
+
+    val homographyError = CardDetector.computeArUcoHomographyError(arUcoMap)
+    if (homographyError == null || homographyError > MAX_CAPTURE_HOMOGRAPHY_ERROR_PX) {
+        return CaptureValidation(false, "Quality low: homography reprojection error is high.", homographyError ?: Float.MAX_VALUE)
+    }
+
+    return CaptureValidation(true, "", homographyError)
+}
+
 private fun drawOverlayCardBitmap(source: Bitmap, cardCorners: List<PointF>): Bitmap {
     val mutable = source.copy(Bitmap.Config.ARGB_8888, true)
     val canvas = AndroidCanvas(mutable)
@@ -247,6 +312,7 @@ fun ScannerScreen() {
     var transformedCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var fullScreenBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var captureStatus by remember { mutableStateOf("Tap Capture Preview to generate side-by-side card images.") }
+    var metricsLine by remember { mutableStateOf("Attempts: 0 | Success: 0 | Avg lock: 0f | Avg time: 0ms | Reject: 0.0%") }
     val captureRequestedRef = remember { AtomicBoolean(false) }
 
     val previewView = remember { PreviewView(context) }
@@ -265,6 +331,11 @@ fun ScannerScreen() {
     val framesSinceFullScanRef = remember { intArrayOf(MAX_FRAMES_BEFORE_RESCAN) }
     val stableFrameCounter = remember { intArrayOf(0) }
     val autoCaptureCooldownRef = remember { intArrayOf(0) }
+    val quickRetryDelayRef = remember { intArrayOf(0) }
+    val retryPendingRef = remember { intArrayOf(0) }
+    val lockStartFrameRef = remember { intArrayOf(-1) }
+    val lockStartTimeMsRef = remember { longArrayOf(0L) }
+    val metricsRef = remember { CaptureMetrics() }
 
     DisposableEffect(Unit) {
         onDispose { cameraExecutor.shutdown() }
@@ -302,18 +373,6 @@ fun ScannerScreen() {
                 var frameCounter = 0
                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                     frameCounter++
-                    // Adaptive frame skip: keep full-rate analysis unless tracking is strongly stable.
-                    val highConfidenceTracked = markerConfidence.count { it.value >= CONFIDENCE_THRESHOLD }
-                    val shouldProcess = when {
-                        stableFrameCounter[0] > 45 && highConfidenceTracked >= 3 -> frameCounter % 4 == 0
-                        stableFrameCounter[0] > 30 && highConfidenceTracked >= 3 -> frameCounter % 3 == 0
-                        stableFrameCounter[0] > 15 && highConfidenceTracked >= 3 -> frameCounter % 2 == 0
-                        else -> true
-                    }
-                    if (!shouldProcess) {
-                        imageProxy.close()
-                        return@setAnalyzer
-                    }
 
                     if (imageProxy.image == null) {
                         imageProxy.close()
@@ -329,12 +388,15 @@ fun ScannerScreen() {
 
                     val lastCentres = lastKnownCentresRef[0]
                     val prevCentres = previousCentresRef[0]
-                    val needsReacquire = lastCentres.isEmpty() ||
-                            framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
 
                     var arUcoMap: Map<Int, List<PointF>> = emptyMap()
                     try {
-                        if (!needsReacquire) {
+                        val capturePending = captureRequestedRef.get()
+                        val highConfidenceTracked = markerConfidence.count { it.value >= CONFIDENCE_THRESHOLD }
+                        val lowConfidenceTracking = highConfidenceTracked < MIN_CAPTURE_HIGH_CONF_MARKERS
+                        val shouldTryTracking = lastCentres.isNotEmpty()
+
+                        if (shouldTryTracking) {
                             val allActiveIds = lastCentres.keys + markerAge.filter { it.value < PERSISTENCE_FRAMES }.keys
                             val predictedCentres = allActiveIds.associateWith { id ->
                                 val kalman = kalmanFilters[id]
@@ -365,17 +427,27 @@ fun ScannerScreen() {
                                 CardDetector.rejectOutliersWithHomography(tracked, templatePoints)
                             } else tracked
 
-                            if (filtered.size < allActiveIds.size / 2) {
-                                framesSinceFullScanRef[0] = MAX_FRAMES_BEFORE_RESCAN
-                            } else {
+                            if (filtered.size >= allActiveIds.size / 2) {
                                 framesSinceFullScanRef[0]++
+                            } else {
+                                framesSinceFullScanRef[0] = (framesSinceFullScanRef[0] + LOW_CONF_FRAMES_BEFORE_RESCAN)
+                                    .coerceAtMost(MAX_FRAMES_BEFORE_RESCAN)
                             }
                             arUcoMap = filtered
-                        } else {
-                            // Faster reacquire with fewer scales
+                        }
+
+                        val shouldReacquire = arUcoMap.size < MIN_CAPTURE_HIGH_CONF_MARKERS &&
+                                (
+                                    !shouldTryTracking ||
+                                            capturePending ||
+                                            (lowConfidenceTracking && framesSinceFullScanRef[0] >= LOW_CONF_FRAMES_BEFORE_RESCAN) ||
+                                            framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
+                                    )
+
+                        if (shouldReacquire) {
                             val reacquired = CardDetector.detectArUcoMarkersReacquire(gray, listOf(0.4, 0.7, 1.0))
                             val templatePoints = Templates.SHARED_MARKER_CENTRES
-                            arUcoMap = if (reacquired.size >= 4) {
+                            arUcoMap = if (reacquired.size >= MIN_CAPTURE_HIGH_CONF_MARKERS) {
                                 CardDetector.rejectOutliersWithHomography(reacquired, templatePoints)
                             } else reacquired
                             framesSinceFullScanRef[0] = 0
@@ -391,8 +463,15 @@ fun ScannerScreen() {
                     }
                     for (id in detectedIds) {
                         val corners = arUcoMap[id] ?: continue
-                        val cx = corners.map { it.x }.average().toFloat()
-                        val cy = corners.map { it.y }.average().toFloat()
+                        var cx = 0f
+                        var cy = 0f
+                        for (corner in corners) {
+                            cx += corner.x
+                            cy += corner.y
+                        }
+                        val count = corners.size.coerceAtLeast(1).toFloat()
+                        cx /= count
+                        cy /= count
                         val kalman = kalmanFilters[id]
                         if (kalman != null) {
                             kalman.update(cx, cy)
@@ -416,19 +495,51 @@ fun ScannerScreen() {
 
                     previousCentresRef[0] = lastKnownCentresRef[0]
                     lastKnownCentresRef[0] = arUcoMap.mapValues { (_, corners) ->
-                        PointF(corners.map { it.x }.average().toFloat(), corners.map { it.y }.average().toFloat())
+                        var x = 0f
+                        var y = 0f
+                        for (corner in corners) {
+                            x += corner.x
+                            y += corner.y
+                        }
+                        val count = corners.size.coerceAtLeast(1).toFloat()
+                        PointF(x / count, y / count)
                     }
 
                     val highConfDetected = detectedIds.count { (markerConfidence[it] ?: 0) >= CONFIDENCE_THRESHOLD }
-                    if (highConfDetected >= 3 && arUcoMap.size >= 3) {
+                    val isStableNow = highConfDetected >= MIN_CAPTURE_HIGH_CONF_MARKERS &&
+                            arUcoMap.size >= MIN_CAPTURE_HIGH_CONF_MARKERS
+                    if (isStableNow) {
                         stableFrameCounter[0]++
+                        if (stableFrameCounter[0] == 1) {
+                            lockStartFrameRef[0] = frameCounter
+                            lockStartTimeMsRef[0] = System.currentTimeMillis()
+                        }
                     } else {
                         stableFrameCounter[0] = 0
+                        lockStartFrameRef[0] = -1
+                        lockStartTimeMsRef[0] = 0L
                     }
                     if (autoCaptureCooldownRef[0] > 0) autoCaptureCooldownRef[0]--
+                    if (quickRetryDelayRef[0] > 0) quickRetryDelayRef[0]--
+
+                    if (
+                        retryPendingRef[0] == 1 &&
+                        quickRetryDelayRef[0] == 0 &&
+                        autoCaptureCooldownRef[0] == 0 &&
+                        !captureRequestedRef.get() &&
+                        isStableNow
+                    ) {
+                        retryPendingRef[0] = 0
+                        captureRequestedRef.set(true)
+                        autoCaptureCooldownRef[0] = QUICK_RETRY_DELAY_FRAMES
+                        coroutineScope.launch(Dispatchers.Main) {
+                            captureStatus = "Retrying capture..."
+                        }
+                    }
+
                     if (
                         stableFrameCounter[0] >= AUTO_CAPTURE_STABLE_FRAMES &&
-                        highConfDetected >= 3 &&
+                        highConfDetected >= MIN_CAPTURE_HIGH_CONF_MARKERS &&
                         autoCaptureCooldownRef[0] == 0 &&
                         !captureRequestedRef.get()
                     ) {
@@ -486,16 +597,44 @@ fun ScannerScreen() {
                     }
 
                     if (captureRequestedRef.compareAndSet(true, false)) {
+                        metricsRef.attempts++
+                        val captureValidation = validateCaptureQuality(arUcoMap, markerConfidence)
+                        if (!captureValidation.accepted) {
+                            metricsRef.qualityRejects++
+                            retryPendingRef[0] = 1
+                            quickRetryDelayRef[0] = QUICK_RETRY_DELAY_FRAMES
+                            autoCaptureCooldownRef[0] = QUICK_RETRY_DELAY_FRAMES
+                            coroutineScope.launch(Dispatchers.Main) {
+                                captureStatus = "${captureValidation.reason} Auto-retrying..."
+                                val attempts = metricsRef.attempts.coerceAtLeast(1)
+                                val rejectRate = (metricsRef.qualityRejects * 100f) / attempts
+                                metricsLine =
+                                    "Attempts: ${metricsRef.attempts} | Success: ${metricsRef.successes} | Avg lock: ${
+                                        if (metricsRef.successes > 0) metricsRef.totalLockFrames.toFloat() / metricsRef.successes else 0f
+                                    }f | Avg time: ${
+                                        if (metricsRef.successes > 0) metricsRef.totalTimeToCaptureMs / metricsRef.successes else 0L
+                                    }ms | Reject: ${"%.1f".format(rejectRate)}%"
+                            }
+                            imageProxy.close()
+                            return@setAnalyzer
+                        }
+
                         val frameBitmap = imageProxy.toBitmap()
                         if (frameBitmap == null) {
+                            retryPendingRef[0] = 1
+                            quickRetryDelayRef[0] = QUICK_RETRY_DELAY_FRAMES
+                            autoCaptureCooldownRef[0] = QUICK_RETRY_DELAY_FRAMES
                             coroutineScope.launch(Dispatchers.Main) {
-                                captureStatus = "Capture failed: frame conversion failed."
+                                captureStatus = "Capture failed: frame conversion failed. Auto-retrying..."
                             }
                         } else {
                             val cardCorners = cardCornersFromArUco(arUcoMap) ?: CardDetector.detectCardCorners(frameBitmap)
                             if (cardCorners == null || cardCorners.size != 4) {
+                                retryPendingRef[0] = 1
+                                quickRetryDelayRef[0] = QUICK_RETRY_DELAY_FRAMES
+                                autoCaptureCooldownRef[0] = QUICK_RETRY_DELAY_FRAMES
                                 coroutineScope.launch(Dispatchers.Main) {
-                                    captureStatus = "Capture failed: unable to estimate full card shape."
+                                    captureStatus = "Capture failed: unable to estimate full card shape. Auto-retrying..."
                                 }
                             } else {
                                 val overlayBitmap = drawOverlayCardBitmap(frameBitmap, cardCorners)
@@ -514,9 +653,32 @@ fun ScannerScreen() {
                                     overlayCaptureBitmap = overlayBitmap
                                     transformedCaptureBitmap = standardized ?: warped
                                     captureStatus = if (standardized != null || warped != null) {
-                                        "✅ Captured original overlay + perspective standardized card."
+                                        val lockFrames = if (lockStartFrameRef[0] >= 0) {
+                                            (frameCounter - lockStartFrameRef[0]).coerceAtLeast(0)
+                                        } else 0
+                                        val lockTimeMs = if (lockStartTimeMsRef[0] > 0L) {
+                                            System.currentTimeMillis() - lockStartTimeMsRef[0]
+                                        } else 0L
+                                        metricsRef.successes++
+                                        metricsRef.totalLockFrames += lockFrames.toLong()
+                                        metricsRef.totalTimeToCaptureMs += lockTimeMs
+                                        retryPendingRef[0] = 0
+                                        val attempts = metricsRef.attempts.coerceAtLeast(1)
+                                        val rejectRate = (metricsRef.qualityRejects * 100f) / attempts
+                                        metricsLine =
+                                            "Attempts: ${metricsRef.attempts} | Success: ${metricsRef.successes} | Avg lock: ${
+                                                if (metricsRef.successes > 0) metricsRef.totalLockFrames.toFloat() / metricsRef.successes else 0f
+                                            }f | Avg time: ${
+                                                if (metricsRef.successes > 0) metricsRef.totalTimeToCaptureMs / metricsRef.successes else 0L
+                                            }ms | Reject: ${"%.1f".format(rejectRate)}%"
+                                        "✅ Captured (${lockTimeMs}ms, lock ${lockFrames}f, hErr ${
+                                            "%.1f".format(captureValidation.homographyErrorPx)
+                                        }px)."
                                     } else {
-                                        "Capture failed: perspective transform could not be generated."
+                                        retryPendingRef[0] = 1
+                                        quickRetryDelayRef[0] = QUICK_RETRY_DELAY_FRAMES
+                                        autoCaptureCooldownRef[0] = QUICK_RETRY_DELAY_FRAMES
+                                        "Capture failed: perspective transform could not be generated. Auto-retrying..."
                                     }
                                 }
                             }
@@ -690,6 +852,17 @@ fun ScannerScreen() {
                             .fillMaxWidth()
                             .background(Color.Black.copy(alpha = 0.55f), shape = MaterialTheme.shapes.small)
                             .padding(8.dp)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = metricsLine,
+                        color = Color.LightGray,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.45f), shape = MaterialTheme.shapes.small)
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
                     )
                     if (overlayCaptureBitmap != null && transformedCaptureBitmap != null) {
                         Spacer(Modifier.height(8.dp))

@@ -469,6 +469,26 @@ object CardDetector {
         )
     }
 
+    fun computeArUcoHomographyError(arUcoResult: Map<Int, List<PointF>>): Float? {
+        if (arUcoResult.size < 2) return null
+        val homography = buildHomographyFromArUco(arUcoResult) ?: return null
+
+        val templatePoints = mutableListOf<PointF>()
+        val imagePoints = mutableListOf<PointF>()
+        for ((id, corners) in arUcoResult) {
+            val templateCorners = Templates.ARUCO_TEMPLATE_CORNERS[id] ?: continue
+            if (corners.size != 4 || templateCorners.size != 4) continue
+            for (i in 0..3) {
+                templatePoints.add(templateCorners[i])
+                imagePoints.add(corners[i])
+            }
+        }
+        if (templatePoints.size < 8) return null
+
+        val errors = HomographySolver.reprojectionErrors(homography, templatePoints, imagePoints)
+        return if (errors.isNotEmpty()) errors.average().toFloat() else null
+    }
+
     fun computeHomographyWithMarkers(
         bitmap: Bitmap,
         qrCorners: List<PointF>,
@@ -746,19 +766,28 @@ object CardDetector {
     private fun markerSearchHalfSize(corners: List<PointF>): Int {
         if (corners.size != 4) return 50
 
-        val sides = (0..3).map { i ->
+        var total = 0f
+        for (i in 0..3) {
             val a = corners[i]
             val b = corners[(i + 1) % 4]
-            distance(a, b)
+            total += distance(a, b)
         }
 
-        return (sides.average() * 2.5).toInt().coerceIn(35, 180)
+        return ((total / 4f) * 2.5f).toInt().coerceIn(35, 180)
     }
 
     private fun centerOf(corners: List<PointF>): PointF {
+        if (corners.isEmpty()) return PointF(0f, 0f)
+        var x = 0f
+        var y = 0f
+        for (corner in corners) {
+            x += corner.x
+            y += corner.y
+        }
+        val count = corners.size.toFloat()
         return PointF(
-            corners.map { it.x }.average().toFloat(),
-            corners.map { it.y }.average().toFloat()
+            x / count,
+            y / count
         )
     }
 
