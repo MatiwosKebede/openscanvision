@@ -18,11 +18,14 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -36,6 +39,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
 import org.opencv.core.CvType
@@ -63,6 +68,8 @@ private const val CONFIDENCE_THRESHOLD = 5
 private const val CONFIDENCE_DECAY = 0.92f
 private const val PERSISTENCE_FRAMES = 20
 private const val ACCELERATION_NOISE = 0.02f
+private const val AUTO_CAPTURE_STABLE_FRAMES = 18
+private const val AUTO_CAPTURE_COOLDOWN_FRAMES = 45
 
 // ─── Constant‑acceleration Kalman filter ────────────────────────
 
@@ -237,6 +244,7 @@ fun ScannerScreen() {
     var isTracking by remember { mutableStateOf(false) }
     var overlayCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var transformedCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var fullScreenBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var captureStatus by remember { mutableStateOf("Tap Capture Preview to generate side-by-side card images.") }
     val captureRequestedRef = remember { AtomicBoolean(false) }
 
@@ -255,6 +263,7 @@ fun ScannerScreen() {
     val smoothedMarkersRef = remember { arrayOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) }
     val framesSinceFullScanRef = remember { intArrayOf(MAX_FRAMES_BEFORE_RESCAN) }
     val stableFrameCounter = remember { intArrayOf(0) }
+    val autoCaptureCooldownRef = remember { intArrayOf(0) }
 
     DisposableEffect(Unit) {
         onDispose { cameraExecutor.shutdown() }
@@ -295,6 +304,7 @@ fun ScannerScreen() {
                     // Adaptive frame skip: keep full-rate analysis unless tracking is strongly stable.
                     val highConfidenceTracked = markerConfidence.count { it.value >= CONFIDENCE_THRESHOLD }
                     val shouldProcess = when {
+                        stableFrameCounter[0] > 45 && highConfidenceTracked >= 3 -> frameCounter % 4 == 0
                         stableFrameCounter[0] > 30 && highConfidenceTracked >= 3 -> frameCounter % 3 == 0
                         stableFrameCounter[0] > 15 && highConfidenceTracked >= 3 -> frameCounter % 2 == 0
                         else -> true
@@ -304,7 +314,10 @@ fun ScannerScreen() {
                         return@setAnalyzer
                     }
 
-                    val mediaImage = imageProxy.image ?: run { imageProxy.close(); return@setAnalyzer }
+                    if (imageProxy.image == null) {
+                        imageProxy.close()
+                        return@setAnalyzer
+                    }
                     val rotationDegrees = imageProxy.imageInfo.rotationDegrees
                     val bufferWidth = imageProxy.width.toFloat()
                     val bufferHeight = imageProxy.height.toFloat()
@@ -410,6 +423,19 @@ fun ScannerScreen() {
                         stableFrameCounter[0]++
                     } else {
                         stableFrameCounter[0] = 0
+                    }
+                    if (autoCaptureCooldownRef[0] > 0) autoCaptureCooldownRef[0]--
+                    if (
+                        stableFrameCounter[0] >= AUTO_CAPTURE_STABLE_FRAMES &&
+                        highConfDetected >= 3 &&
+                        autoCaptureCooldownRef[0] == 0 &&
+                        !captureRequestedRef.get()
+                    ) {
+                        captureRequestedRef.set(true)
+                        autoCaptureCooldownRef[0] = AUTO_CAPTURE_COOLDOWN_FRAMES
+                        coroutineScope.launch(Dispatchers.Main) {
+                            captureStatus = "Auto-capturing on stable card..."
+                        }
                     }
 
                     // Map to screen
@@ -677,6 +703,7 @@ fun ScannerScreen() {
                                 contentDescription = "Original with overlay",
                                 modifier = Modifier
                                     .size(width = 220.dp, height = 140.dp)
+                                    .clickable { fullScreenBitmap = overlayCaptureBitmap }
                                     .background(Color.Black)
                             )
                             Image(
@@ -684,11 +711,54 @@ fun ScannerScreen() {
                                 contentDescription = "Perspective transformed",
                                 modifier = Modifier
                                     .size(width = 220.dp, height = 140.dp)
+                                    .clickable { fullScreenBitmap = transformedCaptureBitmap }
                                     .background(Color.Black)
                             )
                         }
                     }
                 }
+            }
+        }
+    }
+
+    if (fullScreenBitmap != null) {
+        var zoom by remember(fullScreenBitmap) { mutableFloatStateOf(1f) }
+        var pan by remember(fullScreenBitmap) { mutableStateOf(Offset.Zero) }
+
+        Dialog(
+            onDismissRequest = { fullScreenBitmap = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
+                Image(
+                    bitmap = fullScreenBitmap!!.asImageBitmap(),
+                    contentDescription = "Zoomable full screen image",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clipToBounds()
+                        .pointerInput(fullScreenBitmap) {
+                            detectTransformGestures { _, dragAmount, zoomChange, _ ->
+                                zoom = (zoom * zoomChange).coerceIn(1f, 5f)
+                                pan = if (zoom > 1f) pan + dragAmount else Offset.Zero
+                            }
+                        }
+                        .graphicsLayer(
+                            scaleX = zoom,
+                            scaleY = zoom,
+                            translationX = pan.x,
+                            translationY = pan.y
+                        )
+                )
+                TextButton(
+                    onClick = { fullScreenBitmap = null },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(12.dp)
+                ) { Text("Close", color = Color.White) }
             }
         }
     }
