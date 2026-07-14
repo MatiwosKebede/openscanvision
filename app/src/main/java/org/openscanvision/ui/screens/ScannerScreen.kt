@@ -49,6 +49,7 @@ import org.opencv.core.Mat
 import org.openscanvision.omr.CardDetector
 import org.openscanvision.omr.ImagePreprocessor
 import org.openscanvision.omr.Templates
+import org.openscanvision.omr.OMRExtractor
 import org.openscanvision.omr.OpenCVUtils
 import org.openscanvision.omr.toBitmap
 import org.openscanvision.ui.components.StaticViewfinder
@@ -66,17 +67,20 @@ private const val BASE_TRACK_HALF_SIZE = 55          // reduced from 70
 private const val MIN_TRACK_HALF_SIZE = 30           // reduced from 40
 private const val MAX_TRACK_HALF_SIZE = 100          // reduced from 130
 private const val DISPLAY_SMOOTHING_ALPHA = 0.25f
-private const val CONFIDENCE_THRESHOLD = 5
+private const val CONFIDENCE_THRESHOLD = 5           // still used to shrink tracking ROI once a marker is well-established
+private const val CAPTURE_CONFIDENCE_THRESHOLD = 1   // capture trigger only needs a marker seen THIS frame, not a confidence history
 private const val MIN_CAPTURE_HIGH_CONF_MARKERS = 3
-private const val MIN_CAPTURE_AVG_CONF = 6f
-private const val MAX_CAPTURE_HOMOGRAPHY_ERROR_PX = 9f
+private const val REQUIRED_MARKERS_FOR_CAPTURE = 4   // require ALL 4 markers for a high-accuracy capture
+private const val PREDICTED_MARKER_SEARCH_HALF_SIZE = 90
+private const val MIN_CAPTURE_AVG_CONF = 1f          // was 6 — that forced several frames of build-up before capture would even attempt
+private const val MAX_CAPTURE_HOMOGRAPHY_ERROR_PX = 12f   // loosened slightly so a good-but-not-perfect single frame doesn't get bounced into a retry
 private const val MAX_MARKER_AREA_RATIO = 3.0f
 private const val CONFIDENCE_DECAY = 0.92f
 private const val PERSISTENCE_FRAMES = 20
 private const val ACCELERATION_NOISE = 0.02f
-private const val AUTO_CAPTURE_STABLE_FRAMES = 12
-private const val AUTO_CAPTURE_COOLDOWN_FRAMES = 20
-private const val QUICK_RETRY_DELAY_FRAMES = 8
+private const val AUTO_CAPTURE_STABLE_FRAMES = 1      // fire on the very first frame all 4 markers appear — no hold/confirm wait
+private const val AUTO_CAPTURE_COOLDOWN_FRAMES = 4    // reduced from 12
+private const val QUICK_RETRY_DELAY_FRAMES = 2        // reduced from 5
 
 // ─── Constant‑acceleration Kalman filter ────────────────────────
 
@@ -190,6 +194,13 @@ private fun yPlaneToGrayMat(imageProxy: ImageProxy): Mat {
     return mat
 }
 
+private fun centreOfCorners(corners: List<PointF>): PointF {
+    var x = 0f; var y = 0f
+    for (c in corners) { x += c.x; y += c.y }
+    val n = corners.size.coerceAtLeast(1).toFloat()
+    return PointF(x / n, y / n)
+}
+
 private fun cardCornersFromArUco(arUcoMap: Map<Int, List<PointF>>): List<PointF>? {
     val homography = CardDetector.buildHomographyFromArUco(arUcoMap) ?: return null
     val templateCardCorners = listOf(
@@ -229,9 +240,9 @@ private fun validateCaptureQuality(
     arUcoMap: Map<Int, List<PointF>>,
     markerConfidence: Map<Int, Int>
 ): CaptureValidation {
-    val highConfMarkers = arUcoMap.keys.count { (markerConfidence[it] ?: 0) >= CONFIDENCE_THRESHOLD }
-    if (highConfMarkers < MIN_CAPTURE_HIGH_CONF_MARKERS) {
-        return CaptureValidation(false, "Quality low: insufficient stable markers.", Float.MAX_VALUE)
+    val highConfMarkers = arUcoMap.keys.count { (markerConfidence[it] ?: 0) >= CAPTURE_CONFIDENCE_THRESHOLD }
+    if (highConfMarkers < REQUIRED_MARKERS_FOR_CAPTURE) {
+        return CaptureValidation(false, "Quality low: need all 4 markers stable (have $highConfMarkers).", Float.MAX_VALUE)
     }
 
     val avgConfidence = if (arUcoMap.isNotEmpty()) {
@@ -311,6 +322,9 @@ fun ScannerScreen() {
     var overlayCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var transformedCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var fullScreenBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var filledBubbleIndices by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var bubbleReadConfidence by remember { mutableStateOf(0f) }
+    var bubbleTemplateName by remember { mutableStateOf<String?>(null) }
     var captureStatus by remember { mutableStateOf("Tap Capture Preview to generate side-by-side card images.") }
     var metricsLine by remember { mutableStateOf("Attempts: 0 | Success: 0 | Avg lock: 0f | Avg time: 0ms | Reject: 0.0%") }
     val captureRequestedRef = remember { AtomicBoolean(false) }
@@ -354,6 +368,11 @@ fun ScannerScreen() {
     // ─── Camera setup ─────────────────────────────────────────────
 
     fun startCamera() {
+
+        val imageCapture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setTargetResolution(android.util.Size(1920, 1080))
+            .build()
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
             try {
@@ -363,9 +382,9 @@ fun ScannerScreen() {
                 val preview = Preview.Builder().build()
                     .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-                // Lower resolution for speed (480x360)
+                // Lower resolution for speed
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(480, 360))
+                    .setTargetResolution(android.util.Size(640, 360))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setImageQueueDepth(1)
                     .build()
@@ -438,19 +457,38 @@ fun ScannerScreen() {
 
                         val shouldReacquire = arUcoMap.size < MIN_CAPTURE_HIGH_CONF_MARKERS &&
                                 (
-                                    !shouldTryTracking ||
-                                            capturePending ||
-                                            (lowConfidenceTracking && framesSinceFullScanRef[0] >= LOW_CONF_FRAMES_BEFORE_RESCAN) ||
-                                            framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
-                                    )
+                                        !shouldTryTracking ||
+                                                capturePending ||
+                                                (lowConfidenceTracking && framesSinceFullScanRef[0] >= LOW_CONF_FRAMES_BEFORE_RESCAN) ||
+                                                framesSinceFullScanRef[0] >= MAX_FRAMES_BEFORE_RESCAN
+                                        )
 
                         if (shouldReacquire) {
-                            val reacquired = CardDetector.detectArUcoMarkersReacquire(gray, listOf(0.4, 0.7, 1.0))
+                            val reacquired = CardDetector.detectArUcoMarkersReacquire(gray, listOf(0.4, 1.0), earlyBreakCount = 3)
                             val templatePoints = Templates.SHARED_MARKER_CENTRES
                             arUcoMap = if (reacquired.size >= MIN_CAPTURE_HIGH_CONF_MARKERS) {
                                 CardDetector.rejectOutliersWithHomography(reacquired, templatePoints)
                             } else reacquired
                             framesSinceFullScanRef[0] = 0
+                        }
+
+                        // ─── Geometric prediction of any still-missing marker(s) ──────
+                        // The 4 marker positions are fixed by the physical card layout, so
+                        // with 2 or 3 markers already found we can solve exactly where the
+                        // rest should be and search a small ROI there directly — instead of
+                        // capturing with only 3 markers (less accurate homography) or waiting
+                        // for a full reacquire scan to find the 4th. This is what recovers a
+                        // transiently-lost marker within the very same frame.
+                        if (arUcoMap.size in 2 until REQUIRED_MARKERS_FOR_CAPTURE) {
+                            val knownCentres = arUcoMap.mapValues { (_, c) -> centreOfCorners(c) }
+                            val predictions = CardDetector.predictMissingMarkerCentres(knownCentres)
+                            if (predictions.isNotEmpty()) {
+                                val halfSizeMap = predictions.keys.associateWith { PREDICTED_MARKER_SEARCH_HALF_SIZE }
+                                val recovered = CardDetector.detectArUcoMarkersTrackedInGray(gray, predictions, halfSizeMap)
+                                if (recovered.isNotEmpty()) {
+                                    arUcoMap = arUcoMap + recovered
+                                }
+                            }
                         }
                     } finally {
                         gray.release()
@@ -505,9 +543,9 @@ fun ScannerScreen() {
                         PointF(x / count, y / count)
                     }
 
-                    val highConfDetected = detectedIds.count { (markerConfidence[it] ?: 0) >= CONFIDENCE_THRESHOLD }
-                    val isStableNow = highConfDetected >= MIN_CAPTURE_HIGH_CONF_MARKERS &&
-                            arUcoMap.size >= MIN_CAPTURE_HIGH_CONF_MARKERS
+                    val highConfDetected = detectedIds.count { (markerConfidence[it] ?: 0) >= CAPTURE_CONFIDENCE_THRESHOLD }
+                    val isStableNow = highConfDetected >= REQUIRED_MARKERS_FOR_CAPTURE &&
+                            arUcoMap.size >= REQUIRED_MARKERS_FOR_CAPTURE
                     if (isStableNow) {
                         stableFrameCounter[0]++
                         if (stableFrameCounter[0] == 1) {
@@ -539,7 +577,7 @@ fun ScannerScreen() {
 
                     if (
                         stableFrameCounter[0] >= AUTO_CAPTURE_STABLE_FRAMES &&
-                        highConfDetected >= MIN_CAPTURE_HIGH_CONF_MARKERS &&
+                        highConfDetected >= REQUIRED_MARKERS_FOR_CAPTURE &&
                         autoCaptureCooldownRef[0] == 0 &&
                         !captureRequestedRef.get()
                     ) {
@@ -649,9 +687,28 @@ fun ScannerScreen() {
                                     ImagePreprocessor.denoise(contrasted)
                                 }
 
+                                // Read which bubbles are filled straight off the standardized
+                                // card image. This flow has no QR/prefix to say up front whether
+                                // it's a Candidate or Agenda card, so try both templates and keep
+                                // whichever reads more confidently.
+                                val bubbleSource = standardized ?: warped
+                                var omrTemplateName: String? = null
+                                var omrFilled: List<Int> = emptyList()
+                                var omrConfidence = 0f
+                                if (bubbleSource != null) {
+                                    val (template, filled, confidence) =
+                                        OMRExtractor.readFilledBubblesAutoTemplate(bubbleSource)
+                                    omrTemplateName = template.name
+                                    omrFilled = filled
+                                    omrConfidence = confidence
+                                }
+
                                 coroutineScope.launch(Dispatchers.Main) {
                                     overlayCaptureBitmap = overlayBitmap
                                     transformedCaptureBitmap = standardized ?: warped
+                                    filledBubbleIndices = omrFilled
+                                    bubbleReadConfidence = omrConfidence
+                                    bubbleTemplateName = omrTemplateName
                                     captureStatus = if (standardized != null || warped != null) {
                                         val lockFrames = if (lockStartFrameRef[0] >= 0) {
                                             (frameCounter - lockStartFrameRef[0]).coerceAtLeast(0)
@@ -889,6 +946,19 @@ fun ScannerScreen() {
                                     .background(Color.Black)
                             )
                         }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Filled bubbles" +
+                                    (bubbleTemplateName?.let { " ($it, ${(bubbleReadConfidence * 100).toInt()}% conf)" } ?: "") +
+                                    ": " + (if (filledBubbleIndices.isEmpty()) "none detected" else filledBubbleIndices.sorted().joinToString(", ")),
+                            color = Color.Cyan,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.Black.copy(alpha = 0.55f), shape = MaterialTheme.shapes.small)
+                                .padding(8.dp)
+                        )
                     }
                 }
             }

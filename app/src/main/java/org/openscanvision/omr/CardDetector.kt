@@ -18,8 +18,14 @@ import org.opencv.core.Rect
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.sin
 import kotlin.math.sqrt
+
+/** Marker ID -> position. */
+typealias CardModel = Map<Int, PointF>
 
 object CardDetector {
     private const val TAG = "CardDetector"
@@ -36,6 +42,12 @@ object CardDetector {
     private const val MIN_CARD_AREA = 15000
     private const val MAX_CARD_AREA_RATIO = 0.85
     private const val EPSILON_FACTOR = 0.02
+
+    // ─── Geometric cross-check tolerances (for predicting/verifying missing markers) ──
+    private const val PAIR_SCALE_MIN = 0.15f
+    private const val PAIR_SCALE_MAX = 8.0f
+    private const val SCALE_AGREEMENT_TOLERANCE = 0.30f
+    private const val ANGLE_AGREEMENT_TOLERANCE_DEG = 18f
 
     private val sharedDictionary: Dictionary by lazy {
         Aruco.getPredefinedDictionary(ARUCO_DICT_ID)
@@ -293,7 +305,8 @@ object CardDetector {
 
     fun detectArUcoMarkersReacquire(
         gray: Mat,
-        downscaleFactors: List<Double> = listOf(0.35, 0.6, 1.0)
+        downscaleFactors: List<Double> = listOf(0.4, 1.0),
+        earlyBreakCount: Int = 3
     ): Map<Int, List<PointF>> {
         var bestResult = emptyMap<Int, List<PointF>>()
         var bestCount = 0
@@ -354,7 +367,7 @@ object CardDetector {
             if (result.size > bestCount) {
                 bestResult = result
                 bestCount = result.size
-                if (bestCount >= 4) break
+                if (bestCount >= earlyBreakCount) break
             }
         }
 
@@ -388,6 +401,134 @@ object CardDetector {
         }
 
         return markers.filterKeys { it in validIds }
+    }
+
+    // ─── Geometric prediction & verification for missing markers ──────────────────
+    //
+    // The 4 marker positions are fixed by the physical card template (same for every
+    // card), so given at least 2 currently-detected markers we can solve exactly where
+    // any still-missing marker(s) should be and search a small ROI there directly —
+    // instead of waiting for a full multi-scale reacquire scan. This is what lets a
+    // 2-or-3-marker read recover the rest within the same frame.
+
+    private fun applySimilarity(modelPos: PointF, transform: FloatArray): PointF {
+        val angle = transform[0]; val scale = transform[1]; val tx = transform[2]; val ty = transform[3]
+        return PointF(
+            scale * (cos(angle) * modelPos.x - sin(angle) * modelPos.y) + tx,
+            scale * (sin(angle) * modelPos.x + cos(angle) * modelPos.y) + ty
+        )
+    }
+
+    /**
+     * Best-fit similarity transform (rotation + uniform scale + translation, no reflection)
+     * from model points to image points, using ALL given correspondences at once (a
+     * closed-form least-squares fit — equivalent to combining every pairwise estimate,
+     * not just picking one arbitrary pair). With exactly 2 points this reduces to the
+     * direct two-point estimate; with 3+ it's a genuine best fit across all of them.
+     */
+    private fun estimateSimilarityLS(model: CardModel, imageCentres: Map<Int, PointF>): FloatArray? {
+        val ids = model.keys.intersect(imageCentres.keys).toList()
+        if (ids.size < 2) return null
+
+        val mcx = ids.map { model[it]!!.x }.average().toFloat()
+        val mcy = ids.map { model[it]!!.y }.average().toFloat()
+        val icx = ids.map { imageCentres[it]!!.x }.average().toFloat()
+        val icy = ids.map { imageCentres[it]!!.y }.average().toFloat()
+
+        var numReal = 0.0; var numImag = 0.0; var denom = 0.0
+        for (id in ids) {
+            val mx = (model[id]!!.x - mcx).toDouble(); val my = (model[id]!!.y - mcy).toDouble()
+            val ix = (imageCentres[id]!!.x - icx).toDouble(); val iy = (imageCentres[id]!!.y - icy).toDouble()
+            numReal += mx * ix + my * iy
+            numImag += mx * iy - my * ix
+            denom += mx * mx + my * my
+        }
+        if (denom < 1e-6) return null
+        val cReal = (numReal / denom).toFloat()
+        val cImag = (numImag / denom).toFloat()
+        val scale = sqrt((cReal * cReal + cImag * cImag).toDouble()).toFloat()
+        if (scale < 1e-4f) return null
+        val rotation = atan2(cImag, cReal)
+        val tx = icx - (cReal * mcx - cImag * mcy)
+        val ty = icy - (cImag * mcx + cReal * mcy)
+        return floatArrayOf(rotation, scale, tx, ty)
+    }
+
+    /**
+     * Cross-checks detected marker centres against the known fixed layout and against
+     * each other, dropping anything that doesn't fit before it's allowed to influence a
+     * prediction:
+     *  - fewer than 2 markers: nothing to cross-check — passed through as-is.
+     *  - 2 markers: sanity-bound the implied scale (catches a wildly wrong correspondence,
+     *    e.g. a false marker match elsewhere in the frame).
+     *  - 3+ markers: compare every pair's implied scale/rotation against the group median;
+     *    a marker that's only ever part of disagreeing pairs is dropped as a likely
+     *    false/misread detection.
+     */
+    fun verifyAgainstModel(model: CardModel, imageCentres: Map<Int, PointF>): Map<Int, PointF> {
+        if (imageCentres.size < 2) return imageCentres
+
+        data class PairEstimate(val idA: Int, val idB: Int, val scale: Float, val angleDeg: Float)
+
+        val ids = imageCentres.keys.toList()
+        val estimates = mutableListOf<PairEstimate>()
+        for (i in ids.indices) {
+            for (j in i + 1 until ids.size) {
+                val id1 = ids[i]; val id2 = ids[j]
+                val m1 = model[id1] ?: continue; val m2 = model[id2] ?: continue
+                val modelDist = sqrt(((m2.x - m1.x) * (m2.x - m1.x) + (m2.y - m1.y) * (m2.y - m1.y)).toDouble()).toFloat()
+                if (modelDist < 1e-3f) continue
+                val p1 = imageCentres[id1]!!; val p2 = imageCentres[id2]!!
+                val dx = p2.x - p1.x; val dy = p2.y - p1.y
+                val imgDist = sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                if (imgDist < 1e-3f) continue
+                val scale = imgDist / modelDist
+                val modelAngle = atan2((m2.y - m1.y).toDouble(), (m2.x - m1.x).toDouble())
+                var angleDiffDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble()) - modelAngle).toFloat()
+                angleDiffDeg = ((angleDiffDeg + 180f) % 360f + 360f) % 360f - 180f
+                estimates.add(PairEstimate(id1, id2, scale, angleDiffDeg))
+            }
+        }
+        if (estimates.isEmpty()) return imageCentres
+
+        if (imageCentres.size == 2) {
+            val est = estimates.first()
+            return if (est.scale in PAIR_SCALE_MIN..PAIR_SCALE_MAX) imageCentres else emptyMap()
+        }
+
+        val medianScale = estimates.map { it.scale }.sorted()[estimates.size / 2]
+        val medianAngle = estimates.map { it.angleDeg }.sorted()[estimates.size / 2]
+        val agree = mutableMapOf<Int, Int>(); val disagree = mutableMapOf<Int, Int>()
+        for (est in estimates) {
+            val ok = est.scale in PAIR_SCALE_MIN..PAIR_SCALE_MAX &&
+                    abs(est.scale - medianScale) <= medianScale * SCALE_AGREEMENT_TOLERANCE &&
+                    abs(est.angleDeg - medianAngle) <= ANGLE_AGREEMENT_TOLERANCE_DEG
+            for (id in listOf(est.idA, est.idB)) {
+                if (ok) agree[id] = (agree[id] ?: 0) + 1 else disagree[id] = (disagree[id] ?: 0) + 1
+            }
+        }
+        return imageCentres.filterKeys { id -> (agree[id] ?: 0) >= (disagree[id] ?: 0) }
+    }
+
+    /**
+     * Given whichever marker centres are currently known (2, 3, or all 4), predicts image
+     * positions for any that are still missing, using the fixed physical card layout
+     * (`Templates.SHARED_MARKER_CENTRES`, in the same order as marker IDs: TL/TR/BR/BL).
+     * Returns an empty map if there aren't enough *geometrically consistent* markers to fit
+     * a transform from (fewer than 2 after cross-checking).
+     */
+    fun predictMissingMarkerCentres(
+        knownCentres: Map<Int, PointF>,
+        fullModel: CardModel = Templates.SHARED_MARKER_CENTRES.withIndex().associate { (i, p) -> i to p }
+    ): Map<Int, PointF> {
+        val verified = verifyAgainstModel(fullModel, knownCentres)
+        if (verified.size < 2) return emptyMap()
+        val transform = estimateSimilarityLS(fullModel, verified) ?: return emptyMap()
+        val predictions = mutableMapOf<Int, PointF>()
+        for ((id, modelPos) in fullModel) {
+            if (id !in verified) predictions[id] = applySimilarity(modelPos, transform)
+        }
+        return predictions
     }
 
     fun detectArUcoMarkersFull(bitmap: Bitmap): Map<Int, List<PointF>> {

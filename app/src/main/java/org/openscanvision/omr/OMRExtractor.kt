@@ -116,6 +116,38 @@ object OMRExtractor {
     private fun readAgendaBubbles(cleaned: Bitmap): Pair<List<Int>, Float> =
         readBubbles(cleaned, Templates.AGENDA.bubblePositions)
 
+    /**
+     * Reads bubble fill state straight from an already warped/standardized card image —
+     * e.g. one produced by OpenCVUtils.warpCard + ImagePreprocessor — that's already in
+     * Templates.REF_WIDTH × REF_HEIGHT space and already correctly oriented. Unlike
+     * extractCandidateMarks/extractAgendaMarks above, this does NOT apply an extra 180°
+     * rotation — that rotation is a quirk of *this file's own* homography warp, not a
+     * property of a standardized image coming from a different pipeline.
+     *
+     * Returns the list of filled bubble indices (matching `template.bubblePositions`
+     * order) plus a 0..1 confidence score.
+     */
+    fun readFilledBubbles(standardizedBitmap: Bitmap, template: CardTemplate): Pair<List<Int>, Float> =
+        readBubbles(standardizedBitmap, template.bubblePositions)
+
+    /**
+     * Same as [readFilledBubbles], but for flows with no QR/prefix to know up front whether
+     * the card is a Candidate or Agenda card (e.g. the ArUco-only scanner): tries both known
+     * templates and keeps whichever produced the more confident (more bimodal light/dark)
+     * read. Reading bubble positions that don't actually exist on the physical card mostly
+     * samples background/text/noise instead of real bubbles, which tends to score noticeably
+     * less confident than reading the right template.
+     */
+    fun readFilledBubblesAutoTemplate(standardizedBitmap: Bitmap): Triple<CardTemplate, List<Int>, Float> {
+        val candidateResult = readFilledBubbles(standardizedBitmap, Templates.CANDIDATE)
+        val agendaResult = readFilledBubbles(standardizedBitmap, Templates.AGENDA)
+        return if (candidateResult.second >= agendaResult.second) {
+            Triple(Templates.CANDIDATE, candidateResult.first, candidateResult.second)
+        } else {
+            Triple(Templates.AGENDA, agendaResult.first, agendaResult.second)
+        }
+    }
+
     private fun readBubbles(cleaned: Bitmap, positions: List<PointF>): Pair<List<Int>, Float> {
         val w = cleaned.width
         val h = cleaned.height
