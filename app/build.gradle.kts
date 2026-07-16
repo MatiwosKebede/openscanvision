@@ -1,11 +1,12 @@
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
 android {
     namespace = "org.openscanvision"
-    compileSdk = 36 // Fixed syntax here
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "org.openscanvision"
@@ -30,14 +31,20 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+    kotlinOptions {
+        jvmTarget = "11"
+    }
     buildFeatures {
         compose = true
     }
 }
 
 dependencies {
-    // Compose
-    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    // ✅ Use the core library
+    implementation(project(":openscanvision-core"))
+
+    // ─── UI / Camera ─────────────────────────────────────────────
+    implementation(platform(libs.androidx.compose.bom))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.13.0")
@@ -49,24 +56,11 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.3.0")
     implementation("androidx.camera:camera-view:1.3.0")
 
-    // OpenCV (for contour detection and homography)
-    implementation("com.quickbirdstudios:opencv-contrib:4.5.3.0")
+    // Core KTX
+    implementation("androidx.core:core-ktx:1.13.1")
 
-    // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-
-    // Gson (for JSON output)
-    implementation("com.google.code.gson:gson:2.11.0")
-
-    // QR code
-    implementation("com.google.mlkit:barcode-scanning:17.2.0")
-    implementation("com.google.mlkit:barcode-scanning-common:17.0.0")
-    implementation("com.google.android.gms:play-services-tasks:18.1.0")
-
-
-    implementation("androidx.core:core-ktx:1.18.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
-    implementation("androidx.activity:activity-compose:1.13.0")
-
-
+    // Testing
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }

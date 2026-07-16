@@ -1,4 +1,4 @@
-package org.openscanvision.omr
+package org.openscanvision.core.internal.omr
 
 import android.graphics.PointF
 
@@ -11,27 +11,24 @@ data class CardTemplate(
     val bubbleGroups: List<IntRange>? = null
 )
 
-object Templates {
+ object Templates {
     const val REF_WIDTH = 850
     const val REF_HEIGHT = 540
 
-    // QR code wrapper (unchanged)
     val SHARED_QR_CORNERS = listOf(
-        PointF(592.5f, 52.5f),   // TL
-        PointF(727.5f, 52.5f),   // TR
-        PointF(727.5f, 187.5f),  // BR
-        PointF(592.5f, 187.5f)   // BL
+        PointF(592.5f, 52.5f),
+        PointF(727.5f, 52.5f),
+        PointF(727.5f, 187.5f),
+        PointF(592.5f, 187.5f)
     )
 
-    // Marker centres (unchanged)
     val SHARED_MARKER_CENTRES = listOf(
-        PointF(37f, 37f),      // TL
-        PointF(813f, 37f),     // TR
-        PointF(813f, 503f),    // BR
-        PointF(37f, 503f)      // BL
+        PointF(37f, 37f),
+        PointF(813f, 37f),
+        PointF(813f, 503f),
+        PointF(37f, 503f)
     )
 
-    // ArUco marker corners (unchanged)
     val ARUCO_TEMPLATE_CORNERS: Map<Int, List<PointF>> = mapOf(
         0 to listOf(PointF(12f, 12f), PointF(62f, 12f), PointF(62f, 62f), PointF(12f, 62f)),
         1 to listOf(PointF(788f, 12f), PointF(838f, 12f), PointF(838f, 62f), PointF(788f, 62f)),
@@ -39,7 +36,6 @@ object Templates {
         3 to listOf(PointF(12f, 478f), PointF(62f, 478f), PointF(62f, 528f), PointF(12f, 528f))
     )
 
-    // Candidate card: single race, 3 columns × 4 rows
     val CANDIDATE_GROUPS = listOf(0..11)
     val CANDIDATE = CardTemplate(
         name = "Candidate",
@@ -47,25 +43,22 @@ object Templates {
         qrRefCorners = SHARED_QR_CORNERS,
         markerRefPositions = SHARED_MARKER_CENTRES,
         bubbleGroups = CANDIDATE_GROUPS,
-        // Grid: [1,2,3], [4,5,6], [7,8,9], [10,11,12]
-        // Bubbles 11 & 12 shifted down by 0.5 mm (5 units)
         bubblePositions = listOf(
-            PointF(90.2f, 264.2f),   // 1
-            PointF(325.2f, 264.2f),  // 2
-            PointF(577.2f, 264.2f),  // 3
-            PointF(90.2f, 329.2f),   // 4
-            PointF(328.2f, 329.2f),  // 5
-            PointF(577.2f, 329.2f),  // 6
-            PointF(90.2f, 393.2f),   // 7
-            PointF(328.2f, 393.2f),  // 8
-            PointF(577.2f, 393.2f),  // 9
-            PointF(90.2f, 455.2f),   // 10
-            PointF(328.2f, 455.2f),  // 11 (Y +5)
-            PointF(577.2f, 455.2f)   // 12 (Y +5)
+            PointF(90.2f, 264.2f),
+            PointF(325.2f, 264.2f),
+            PointF(577.2f, 264.2f),
+            PointF(90.2f, 329.2f),
+            PointF(328.2f, 329.2f),
+            PointF(577.2f, 329.2f),
+            PointF(90.2f, 393.2f),
+            PointF(328.2f, 393.2f),
+            PointF(577.2f, 393.2f),
+            PointF(90.2f, 455.2f),
+            PointF(328.2f, 455.2f),
+            PointF(577.2f, 455.2f)
         )
     )
 
-    // Agenda card: unchanged
     val AGENDA_GROUPS = listOf(0..2, 3..5, 6..8, 9..11)
     val AGENDA = CardTemplate(
         name = "Agenda",

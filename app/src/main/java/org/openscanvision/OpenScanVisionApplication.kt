@@ -2,16 +2,16 @@ package org.openscanvision
 
 import android.app.Application
 import android.util.Log
-import org.opencv.android.OpenCVLoader
+import org.openscanvision.core.OpenScanVision
 
 class OpenScanVisionApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        // ─── OpenCV Native Libraries ──────────────────────────────
-        if (!OpenCVLoader.initDebug()) {
-            Log.e("OpenCV", "OpenCV initialization failed – native libraries not loaded")
+        val initialized = OpenScanVision.initialize(this)
+        if (!initialized) {
+            Log.e("OpenScanVision", "OpenCV initialization failed – check native libraries")
         } else {
-            Log.d("OpenCV", "OpenCV initialized successfully")
+            Log.d("OpenScanVision", "OpenCV initialized successfully")
         }
     }
 }

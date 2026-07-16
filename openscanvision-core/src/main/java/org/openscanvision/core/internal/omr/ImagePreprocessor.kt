@@ -1,4 +1,4 @@
-package org.openscanvision.omr
+package org.openscanvision.core.internal.omr
 
 import android.graphics.Bitmap
 import org.opencv.android.Utils
@@ -6,13 +6,8 @@ import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 
-object ImagePreprocessor {
+internal object ImagePreprocessor {
 
-    /**
-     * Enhances local contrast using CLAHE (Contrast Limited Adaptive Histogram Equalization)
-     * instead of global CDF equalization. This prevents the aggressive amplification of
-     * high-frequency background noise and paper texture.
-     */
     fun enhanceContrast(bitmap: Bitmap): Bitmap {
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
@@ -24,7 +19,6 @@ object ImagePreprocessor {
             src.copyTo(gray)
         }
 
-        // Apply CLAHE with a conservative clip limit to avoid blowing up paper textures
         val clahe = Imgproc.createCLAHE(2.0, Size(8.0, 8.0))
         val destGray = Mat()
         clahe.apply(gray, destGray)
@@ -41,10 +35,6 @@ object ImagePreprocessor {
         return result
     }
 
-    /**
-     * Highly optimized native Median Blur utilizing OpenCV.
-     * Replaces the slow, nested Kotlin pixel-by-pixel loops with high-speed C++ execution.
-     */
     fun denoise(bitmap: Bitmap): Bitmap {
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
@@ -57,7 +47,6 @@ object ImagePreprocessor {
         }
 
         val denoised = Mat()
-        // 3x3 kernel size is optimal for deleting paper grain while keeping bubble edges crisp
         Imgproc.medianBlur(gray, denoised, 3)
 
         val dest = Mat()
@@ -72,9 +61,6 @@ object ImagePreprocessor {
         return result
     }
 
-    /**
-     * Normalizes grayscale ranges across the image using NORM_MINMAX.
-     */
     fun normalize(bitmap: Bitmap): Bitmap {
         val src = Mat()
         Utils.bitmapToMat(bitmap, src)
@@ -101,9 +87,6 @@ object ImagePreprocessor {
         return result
     }
 
-    /**
-     * Classic Otsu's thresholding calculation over flat 1D intensity arrays.
-     */
     fun otsuThreshold(intensities: IntArray): Int {
         if (intensities.isEmpty()) return 128
 
@@ -143,10 +126,6 @@ object ImagePreprocessor {
         return threshold
     }
 
-    /**
-     * Computes Otsu's adaptive threshold alongside a bimodal confidence score.
-     * The confidence represents how clearly separated the light and dark pixel populations are.
-     */
     fun adaptiveThresholdWithConfidence(intensities: IntArray): Pair<Int, Float> {
         val threshold = otsuThreshold(intensities)
 

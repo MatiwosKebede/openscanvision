@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OpenScanVision"
 include(":app")
- 
+include(":openscanvision-core")   // <-- Important

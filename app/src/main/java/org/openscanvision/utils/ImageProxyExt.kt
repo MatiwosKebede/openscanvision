@@ -1,4 +1,4 @@
-package org.openscanvision.omr
+package org.openscanvision.utils
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -33,7 +33,6 @@ private fun yuv420888ToNv21(image: ImageProxy): ByteArray? {
     val nv21 = ByteArray(ySize + uSize + vSize)
     yBuffer.get(nv21, 0, ySize)
 
-    // NV21: Y plane then interleaved VU
     val uvSize = uSize
     val uvBuffer = ByteArray(uvSize * 2)
     var idx = 0

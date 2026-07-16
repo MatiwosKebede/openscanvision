@@ -1,10 +1,10 @@
-package org.openscanvision.omr
+package org.openscanvision.core.internal.omr
 
 import android.graphics.Bitmap
 import android.graphics.PointF
 import kotlin.math.sqrt
 
-object BubbleAnalyzer {
+internal object BubbleAnalyzer {
 
     fun sampleDarkness(bitmap: Bitmap, positions: List<PointF>, radiusPx: Int): FloatArray {
         val result = FloatArray(positions.size)
@@ -68,7 +68,6 @@ object BubbleAnalyzer {
         return goodGroups.toFloat() / groups.size
     }
 
-    // Utility to average multiple bitmaps (optional, but kept for completeness)
     fun averageBitmaps(bitmaps: List<Bitmap>): Bitmap {
         require(bitmaps.isNotEmpty())
         val w = bitmaps.first().width

@@ -1,4 +1,4 @@
-package org.openscanvision.omr
+package org.openscanvision.core.internal.omr
 
 import android.graphics.Bitmap
 import android.graphics.Matrix
@@ -24,10 +24,7 @@ import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** Marker ID -> position. */
-typealias CardModel = Map<Int, PointF>
-
-object CardDetector {
+ object CardDetector {
     private const val TAG = "CardDetector"
 
     private const val ARUCO_DICT_ID = Aruco.DICT_5X5_50
@@ -43,7 +40,6 @@ object CardDetector {
     private const val MAX_CARD_AREA_RATIO = 0.85
     private const val EPSILON_FACTOR = 0.02
 
-    // ─── Geometric cross-check tolerances (for predicting/verifying missing markers) ──
     private const val PAIR_SCALE_MIN = 0.15f
     private const val PAIR_SCALE_MAX = 8.0f
     private const val SCALE_AGREEMENT_TOLERANCE = 0.30f
@@ -403,14 +399,6 @@ object CardDetector {
         return markers.filterKeys { it in validIds }
     }
 
-    // ─── Geometric prediction & verification for missing markers ──────────────────
-    //
-    // The 4 marker positions are fixed by the physical card template (same for every
-    // card), so given at least 2 currently-detected markers we can solve exactly where
-    // any still-missing marker(s) should be and search a small ROI there directly —
-    // instead of waiting for a full multi-scale reacquire scan. This is what lets a
-    // 2-or-3-marker read recover the rest within the same frame.
-
     private fun applySimilarity(modelPos: PointF, transform: FloatArray): PointF {
         val angle = transform[0]; val scale = transform[1]; val tx = transform[2]; val ty = transform[3]
         return PointF(
@@ -419,14 +407,7 @@ object CardDetector {
         )
     }
 
-    /**
-     * Best-fit similarity transform (rotation + uniform scale + translation, no reflection)
-     * from model points to image points, using ALL given correspondences at once (a
-     * closed-form least-squares fit — equivalent to combining every pairwise estimate,
-     * not just picking one arbitrary pair). With exactly 2 points this reduces to the
-     * direct two-point estimate; with 3+ it's a genuine best fit across all of them.
-     */
-    private fun estimateSimilarityLS(model: CardModel, imageCentres: Map<Int, PointF>): FloatArray? {
+    private fun estimateSimilarityLS(model: Map<Int, PointF>, imageCentres: Map<Int, PointF>): FloatArray? {
         val ids = model.keys.intersect(imageCentres.keys).toList()
         if (ids.size < 2) return null
 
@@ -454,18 +435,7 @@ object CardDetector {
         return floatArrayOf(rotation, scale, tx, ty)
     }
 
-    /**
-     * Cross-checks detected marker centres against the known fixed layout and against
-     * each other, dropping anything that doesn't fit before it's allowed to influence a
-     * prediction:
-     *  - fewer than 2 markers: nothing to cross-check — passed through as-is.
-     *  - 2 markers: sanity-bound the implied scale (catches a wildly wrong correspondence,
-     *    e.g. a false marker match elsewhere in the frame).
-     *  - 3+ markers: compare every pair's implied scale/rotation against the group median;
-     *    a marker that's only ever part of disagreeing pairs is dropped as a likely
-     *    false/misread detection.
-     */
-    fun verifyAgainstModel(model: CardModel, imageCentres: Map<Int, PointF>): Map<Int, PointF> {
+    fun verifyAgainstModel(model: Map<Int, PointF>, imageCentres: Map<Int, PointF>): Map<Int, PointF> {
         if (imageCentres.size < 2) return imageCentres
 
         data class PairEstimate(val idA: Int, val idB: Int, val scale: Float, val angleDeg: Float)
@@ -510,16 +480,9 @@ object CardDetector {
         return imageCentres.filterKeys { id -> (agree[id] ?: 0) >= (disagree[id] ?: 0) }
     }
 
-    /**
-     * Given whichever marker centres are currently known (2, 3, or all 4), predicts image
-     * positions for any that are still missing, using the fixed physical card layout
-     * (`Templates.SHARED_MARKER_CENTRES`, in the same order as marker IDs: TL/TR/BR/BL).
-     * Returns an empty map if there aren't enough *geometrically consistent* markers to fit
-     * a transform from (fewer than 2 after cross-checking).
-     */
     fun predictMissingMarkerCentres(
         knownCentres: Map<Int, PointF>,
-        fullModel: CardModel = Templates.SHARED_MARKER_CENTRES.withIndex().associate { (i, p) -> i to p }
+        fullModel: Map<Int, PointF> = Templates.SHARED_MARKER_CENTRES.withIndex().associate { (i, p) -> i to p }
     ): Map<Int, PointF> {
         val verified = verifyAgainstModel(fullModel, knownCentres)
         if (verified.size < 2) return emptyMap()
@@ -643,7 +606,6 @@ object CardDetector {
         var arUcoMap = detectArUcoMarkersGuided(bitmap, qrCorners, template)
 
         if (arUcoMap.size < 2) {
-            Log.d(TAG, "Guided ArUco found ${arUcoMap.size}, trying full frame")
             arUcoMap = detectArUcoMarkersFull(bitmap)
         }
 
@@ -660,7 +622,6 @@ object CardDetector {
                 val meanErr = errors.average().toFloat()
 
                 if (meanErr < 10f) {
-                    Log.d(TAG, "Using ArUco homography, error=$meanErr")
                     return Pair(arucoHomography, meanErr)
                 }
             }
@@ -679,7 +640,6 @@ object CardDetector {
         }
 
         if (templatePts.size < 2) {
-            Log.d(TAG, "ArUco found ${templatePts.size}, using centroid fallback")
             val predicted = predictImagePoints(markerRefs, qrHomography)
             val detected = detectMarkersNearPredicted(bitmap, predicted)
 
@@ -705,7 +665,6 @@ object CardDetector {
             if (refined != null) return refined
         }
 
-        Log.d(TAG, "Using QR-only homography")
         return Pair(qrHomography, 12f)
     }
 
@@ -881,7 +840,7 @@ object CardDetector {
             1 -> src.copyTo(gray)
             3 -> Imgproc.cvtColor(src, gray, Imgproc.COLOR_BGR2GRAY)
             4 -> Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY)
-            else -> Log.w(TAG, "Unsupported bitmap channel count: ${src.channels()}")
+            else -> {}
         }
 
         src.release()
@@ -991,7 +950,6 @@ object CardDetector {
                 hMat.release()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "findHomography failed", e)
             null
         } finally {
             src.release()
@@ -1073,7 +1031,6 @@ object CardDetector {
                     hMat.release()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Homography solve failed", e)
                 null
             } finally {
                 src2f.release()

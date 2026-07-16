@@ -1,4 +1,4 @@
-package org.openscanvision.omr
+package org.openscanvision.core.internal.omr
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -33,20 +33,22 @@ object OMRExtractor {
     private const val REFINE_SEARCH_STEP = 2
 
     // ── Decision thresholds ───────────────────────────────────────
-    private const val MIN_NORMALIZED_DARKNESS = 0.45f
+    // Lowered to match the original working version
+    private const val MIN_NORMALIZED_DARKNESS = 0.35f   // was 0.45
     private const val AMBIGUOUS_MARGIN = 0.15f
 
     // A pixel counts as "ink" only once it's meaningfully darker than the bubble's own
     // local background — both a relative drop AND a minimum absolute drop are required,
-    // whichever is stricter. These were previously loose enough that ordinary paper
-    // grain and CLAHE-amplified print texture routinely crossed the bar; raised here
-    // so only real, solid marks register.
-    private const val INK_RELATIVE_DROP = 0.35f
-    private const val INK_MIN_ABSOLUTE_DROP = 35f
+    // whichever is stricter.
+    private const val INK_RELATIVE_DROP = 0.30f   // was 0.35
+    private const val INK_MIN_ABSOLUTE_DROP = 25f // was 35
 
     // Below this raw darkness gap we don't bother running centroid refinement —
     // there's no signal to chase, and it keeps empty bubbles cheap.
     private const val CENTROID_REFINE_MIN_SIGNAL = 8f
+
+    // Disable illumination flattening – it may cause false negatives on some cards
+    private const val ENABLE_ILLUMINATION_FLATTENING = false
 
     enum class GroupStatus { EMPTY, SINGLE, OVERVOTE, LOW_CONFIDENCE }
 
@@ -101,7 +103,7 @@ object OMRExtractor {
             pts
         }.map { it.first to it.second }
 
-    // ── Public entry points (signatures unchanged) ───────────────
+    // ── Public entry points ─────────────────────────────────────────
 
     fun extractCandidateMarks(
         originalBitmap: Bitmap,
@@ -287,13 +289,8 @@ object OMRExtractor {
     /**
      * Estimates the slow-varying illumination/shading field across the card with a
      * large-kernel blur, then divides it out. Runs once per capture, not per frame.
-     *
-     * If you're still seeing anomalies after the fillRatio fix below, set
-     * ENABLE_ILLUMINATION_FLATTENING to false to isolate whether this step is a
-     * contributing factor on your actual card images before re-enabling it.
+     * Disabled by default to match original behavior.
      */
-    private const val ENABLE_ILLUMINATION_FLATTENING = true
-
     private fun flattenIllumination(bitmap: Bitmap): Bitmap {
         if (!ENABLE_ILLUMINATION_FLATTENING) return bitmap
 
@@ -315,9 +312,6 @@ object OMRExtractor {
 
             Imgproc.GaussianBlur(gray32, illumination, Size(kernelSize.toDouble(), kernelSize.toDouble()), 0.0)
 
-            // Guard against near-zero illumination values blowing up the division —
-            // shouldn't happen on a mostly-white card, but cheap insurance against
-            // extreme corrected values if it ever does.
             Core.max(illumination, Scalar(10.0), illumination)
 
             val meanIllum = Core.mean(illumination).`val`[0]
@@ -404,9 +398,7 @@ object OMRExtractor {
 
         // Require BOTH signals to agree rather than blending them — this is the key
         // fix for the false-positive regression. A bubble only registers as filled
-        // if the average darkness AND the inner-core fill-ratio both indicate ink;
-        // either one spiking alone (e.g. from print texture or a stray dark pixel)
-        // can no longer carry the decision on its own.
+        // if the average darkness AND the inner-core fill-ratio both indicate ink.
         val combinedScore = minOf(normalizedDarkness, fillRatio)
 
         return BubbleRead(
@@ -479,12 +471,6 @@ object OMRExtractor {
     private fun sampleDisk(pixels: IntArray, width: Int, height: Int, cx: Int, cy: Int): Float =
         sampleWeighted(pixels, width, height, cx, cy, diskKernel(BUBBLE_RADIUS))
 
-    /**
-     * Fraction of the *inner-core* disk (radius INNER_FILL_RADIUS, well inside the
-     * printed bubble circle) classified as ink. Keeping this radius small and the
-     * threshold strict is what stops the printed outline and paper grain from being
-     * mistaken for a mark.
-     */
     private fun sampleFillRatio(pixels: IntArray, width: Int, height: Int, cx: Int, cy: Int, background: Float): Float {
         val kernel = diskKernel(INNER_FILL_RADIUS)
         if (kernel.isEmpty()) return 0f

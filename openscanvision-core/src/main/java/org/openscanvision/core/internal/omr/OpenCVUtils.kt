@@ -1,13 +1,16 @@
-package org.openscanvision.omr
+package org.openscanvision.core.internal.omr
 
 import android.graphics.Bitmap
 import android.graphics.PointF
 import org.opencv.android.Utils
 import org.opencv.calib3d.Calib3d
-import org.opencv.core.*
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint2f
+import org.opencv.core.Point
+import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 
-object OpenCVUtils {
+internal object OpenCVUtils {
     fun warpCard(
         original: Bitmap,
         corners: List<PointF>,
