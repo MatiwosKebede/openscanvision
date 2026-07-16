@@ -19,34 +19,43 @@ object OMRExtractor {
     private const val TAG = "OMRExtractor"
 
     // ── Geometry (0.1 mm units) ──────────────────────────────────
-    // Reduced bubble sampling radius (was 13) → now 1.0 mm radius (2.0 mm diameter).
-    // This makes detection more demanding: marks must be more centred and darker inside
-    // a smaller area, reducing false positives from partial or light marks.
     private const val BUBBLE_RADIUS = 10
-    private const val RING_INNER = 19             // local‑background ring: inner radius (unchanged)
-    private const val RING_OUTER = 27             // local‑background ring: outer radius (unchanged)
+    private const val RING_INNER = 19
+    private const val RING_OUTER = 27
 
-    // Bounded local re‑centering (unchanged)
+    // Fill-ratio ("is there solid ink here") samples a *smaller* radius than the
+    // average-darkness disk, so it stays well inside the printed bubble circle and
+    // never picks up the circle's own outline ink as a false "filled" signal.
+    private const val INNER_FILL_RADIUS = 6
+
+    // Bounded local re‑centering
     private const val REFINE_SEARCH_RADIUS = 4
     private const val REFINE_SEARCH_STEP = 2
 
-    // ── Decision thresholds (tightened for robustness) ───────────
-    // A bubble is considered filled only if its relative darkness is ≥ 45 % of its
-    // local background (was 30 %). Together with the smaller sampling radius, this
-    // virtually eliminates faint accidental marks or misregistered prints.
+    // ── Decision thresholds ───────────────────────────────────────
     private const val MIN_NORMALIZED_DARKNESS = 0.45f
-
-    // Margin between the darkest and second‑darkest bubble in a group to confidently
-    // call a single winner (raised to 0.15f to reduce ambiguous cases).
     private const val AMBIGUOUS_MARGIN = 0.15f
+
+    // A pixel counts as "ink" only once it's meaningfully darker than the bubble's own
+    // local background — both a relative drop AND a minimum absolute drop are required,
+    // whichever is stricter. These were previously loose enough that ordinary paper
+    // grain and CLAHE-amplified print texture routinely crossed the bar; raised here
+    // so only real, solid marks register.
+    private const val INK_RELATIVE_DROP = 0.35f
+    private const val INK_MIN_ABSOLUTE_DROP = 35f
+
+    // Below this raw darkness gap we don't bother running centroid refinement —
+    // there's no signal to chase, and it keeps empty bubbles cheap.
+    private const val CENTROID_REFINE_MIN_SIGNAL = 8f
 
     enum class GroupStatus { EMPTY, SINGLE, OVERVOTE, LOW_CONFIDENCE }
 
     data class BubbleRead(
         val index: Int,
-        val normalizedDarkness: Float,
+        val normalizedDarkness: Float, // blended (min-combined) score, used for decisions
         val rawIntensity: Float,
-        val localBackground: Float
+        val localBackground: Float,
+        val fillRatio: Float = 0f      // fraction of the *inner* disk pixels classified as ink
     )
 
     data class GroupResult(
@@ -275,13 +284,71 @@ object OMRExtractor {
         return rotated
     }
 
+    /**
+     * Estimates the slow-varying illumination/shading field across the card with a
+     * large-kernel blur, then divides it out. Runs once per capture, not per frame.
+     *
+     * If you're still seeing anomalies after the fillRatio fix below, set
+     * ENABLE_ILLUMINATION_FLATTENING to false to isolate whether this step is a
+     * contributing factor on your actual card images before re-enabling it.
+     */
+    private const val ENABLE_ILLUMINATION_FLATTENING = true
+
+    private fun flattenIllumination(bitmap: Bitmap): Bitmap {
+        if (!ENABLE_ILLUMINATION_FLATTENING) return bitmap
+
+        val src = Mat()
+        val gray = Mat()
+        val gray32 = Mat()
+        val illumination = Mat()
+        val corrected32 = Mat()
+        val corrected8 = Mat()
+        val dest = Mat()
+        return try {
+            Utils.bitmapToMat(bitmap, src)
+            if (src.channels() > 1) Imgproc.cvtColor(src, gray, Imgproc.COLOR_RGBA2GRAY) else src.copyTo(gray)
+            gray.convertTo(gray32, CvType.CV_32F)
+
+            var kernelSize = bitmap.width / 6
+            if (kernelSize < 31) kernelSize = 31
+            if (kernelSize % 2 == 0) kernelSize += 1
+
+            Imgproc.GaussianBlur(gray32, illumination, Size(kernelSize.toDouble(), kernelSize.toDouble()), 0.0)
+
+            // Guard against near-zero illumination values blowing up the division —
+            // shouldn't happen on a mostly-white card, but cheap insurance against
+            // extreme corrected values if it ever does.
+            Core.max(illumination, Scalar(10.0), illumination)
+
+            val meanIllum = Core.mean(illumination).`val`[0]
+            if (meanIllum <= 1.0) return bitmap
+
+            Core.divide(gray32, illumination, corrected32, meanIllum)
+            Core.min(corrected32, Scalar(255.0), corrected32)
+            corrected32.convertTo(corrected8, CvType.CV_8U)
+
+            Imgproc.cvtColor(corrected8, dest, Imgproc.COLOR_GRAY2RGBA)
+            val result = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            Utils.matToBitmap(dest, result)
+            result
+        } catch (e: Exception) {
+            Log.w(TAG, "Illumination flattening failed, using original image", e)
+            bitmap
+        } finally {
+            src.release(); gray.release(); gray32.release()
+            illumination.release(); corrected32.release(); corrected8.release(); dest.release()
+        }
+    }
+
     // ── Core group‑aware bubble reading ──────────────────────────
 
     private fun readBubbleGroups(cleaned: Bitmap, template: CardTemplate): BubbleReport {
-        val w = cleaned.width
-        val h = cleaned.height
+        val flattened = flattenIllumination(cleaned)
+        val w = flattened.width
+        val h = flattened.height
         val pixels = IntArray(w * h)
-        cleaned.getPixels(pixels, 0, w, 0, 0, w, h)
+        flattened.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (flattened !== cleaned) flattened.recycle()
 
         val positions = template.bubblePositions
         val groups = template.bubbleGroups ?: listOf(positions.indices.first..positions.indices.last)
@@ -321,8 +388,61 @@ object OMRExtractor {
             dy += REFINE_SEARCH_STEP
         }
 
+        if (background - bestIntensity > CENTROID_REFINE_MIN_SIGNAL) {
+            val (rx, ry) = refineCentroid(pixels, w, h, bestCenter.first, bestCenter.second, background)
+            if (rx != bestCenter.first || ry != bestCenter.second) {
+                val refinedIntensity = sampleDisk(pixels, w, h, rx, ry)
+                if (refinedIntensity <= bestIntensity) {
+                    bestCenter = Pair(rx, ry)
+                    bestIntensity = refinedIntensity
+                }
+            }
+        }
+
         val normalizedDarkness = ((background - bestIntensity) / background.coerceAtLeast(1f)).coerceIn(0f, 1f)
-        return BubbleRead(index, normalizedDarkness, bestIntensity, background)
+        val fillRatio = sampleFillRatio(pixels, w, h, bestCenter.first, bestCenter.second, background)
+
+        // Require BOTH signals to agree rather than blending them — this is the key
+        // fix for the false-positive regression. A bubble only registers as filled
+        // if the average darkness AND the inner-core fill-ratio both indicate ink;
+        // either one spiking alone (e.g. from print texture or a stray dark pixel)
+        // can no longer carry the decision on its own.
+        val combinedScore = minOf(normalizedDarkness, fillRatio)
+
+        return BubbleRead(
+            index = index,
+            normalizedDarkness = combinedScore,
+            rawIntensity = bestIntensity,
+            localBackground = background,
+            fillRatio = fillRatio
+        )
+    }
+
+    private fun refineCentroid(pixels: IntArray, width: Int, height: Int, cx: Int, cy: Int, background: Float): Pair<Int, Int> {
+        val searchRadius = BUBBLE_RADIUS + REFINE_SEARCH_RADIUS
+        var sumX = 0.0
+        var sumY = 0.0
+        var sumW = 0.0
+        for (dy in -searchRadius..searchRadius) {
+            for (dx in -searchRadius..searchRadius) {
+                if (dx * dx + dy * dy > searchRadius * searchRadius) continue
+                val x = cx + dx
+                val y = cy + dy
+                if (x < 0 || x >= width || y < 0 || y >= height) continue
+                val gray = ((pixels[y * width + x] shr 16) and 0xFF).toFloat()
+                val darkness = (background - gray).coerceAtLeast(0f)
+                sumX += darkness * x
+                sumY += darkness * y
+                sumW += darkness
+            }
+        }
+        if (sumW < 1.0) return Pair(cx, cy)
+        val refinedX = (sumX / sumW).toInt()
+        val refinedY = (sumY / sumW).toInt()
+        val maxShift = REFINE_SEARCH_RADIUS
+        val clampedX = cx + (refinedX - cx).coerceIn(-maxShift, maxShift)
+        val clampedY = cy + (refinedY - cy).coerceIn(-maxShift, maxShift)
+        return Pair(clampedX, clampedY)
     }
 
     private fun evaluateGroup(range: IntRange, reads: List<BubbleRead>): GroupResult {
@@ -358,6 +478,30 @@ object OMRExtractor {
 
     private fun sampleDisk(pixels: IntArray, width: Int, height: Int, cx: Int, cy: Int): Float =
         sampleWeighted(pixels, width, height, cx, cy, diskKernel(BUBBLE_RADIUS))
+
+    /**
+     * Fraction of the *inner-core* disk (radius INNER_FILL_RADIUS, well inside the
+     * printed bubble circle) classified as ink. Keeping this radius small and the
+     * threshold strict is what stops the printed outline and paper grain from being
+     * mistaken for a mark.
+     */
+    private fun sampleFillRatio(pixels: IntArray, width: Int, height: Int, cx: Int, cy: Int, background: Float): Float {
+        val kernel = diskKernel(INNER_FILL_RADIUS)
+        if (kernel.isEmpty()) return 0f
+
+        val inkThreshold = background - (background * INK_RELATIVE_DROP).coerceAtLeast(INK_MIN_ABSOLUTE_DROP)
+        var darkWeight = 0.0
+        var totalWeight = 0.0
+        for ((dx, dy, weight) in kernel) {
+            val x = cx + dx
+            val y = cy + dy
+            if (x < 0 || x >= width || y < 0 || y >= height) continue
+            val gray = ((pixels[y * width + x] shr 16) and 0xFF).toFloat()
+            totalWeight += weight
+            if (gray <= inkThreshold) darkWeight += weight
+        }
+        return if (totalWeight > 0) (darkWeight / totalWeight).toFloat() else 0f
+    }
 
     private fun sampleRingMedian(pixels: IntArray, width: Int, height: Int, cx: Int, cy: Int): Float {
         val ring = ringOffsets(RING_INNER, RING_OUTER)

@@ -48,6 +48,7 @@ import org.openscanvision.omr.ImagePreprocessor
 import org.openscanvision.omr.Templates
 import org.openscanvision.omr.OMRExtractor
 import org.openscanvision.omr.OpenCVUtils
+import org.openscanvision.omr.QrDecoder
 import org.openscanvision.omr.toBitmap
 import org.openscanvision.ui.components.StaticViewfinder
 import java.nio.ByteBuffer
@@ -292,6 +293,7 @@ fun ScannerScreen() {
     var filledBubbleIndices by remember { mutableStateOf<List<Int>>(emptyList()) }  // 1‑based
     var bubbleReadConfidence by remember { mutableStateOf(0f) }
     var bubbleTemplateName by remember { mutableStateOf<String?>(null) }
+    var qrTokenText by remember { mutableStateOf<String?>(null) }
     var captureStatus by remember { mutableStateOf("Position the card inside the viewfinder to scan.") }
     var metricsLine by remember { mutableStateOf("Attempts: 0 | Success: 0 | Avg lock: 0f | Avg time: 0ms | Reject: 0.0%") }
     val captureRequestedRef = remember { AtomicBoolean(false) }
@@ -510,8 +512,28 @@ fun ScannerScreen() {
                         val cleaned = ImagePreprocessor.enhanceContrast(warped)
                         val standardized = ImagePreprocessor.denoise(cleaned)
                         val template = Templates.CANDIDATE
-                        val report = OMRExtractor.readBubbleGroupsDetailed(standardized, template)
-                        val annotatedBitmap = OMRExtractor.renderAnnotatedImage(standardized, template, report, null)
+
+                        // OMR reading and QR decoding are independent one-shot jobs at
+                        // this point (not per-frame), so run them concurrently rather
+                        // than paying their latency back-to-back.
+                        val (report, decodedQrText) = runBlocking {
+                            coroutineScope {
+                                val omrDeferred = async(Dispatchers.Default) {
+                                    OMRExtractor.readBubbleGroupsDetailed(standardized, template)
+                                }
+                                val qrDeferred = async(Dispatchers.Default) {
+                                    QrDecoder.decodeFromOriginalFrame(
+                                        frameBitmap = frameBitmap,
+                                        cardCorners = cardCorners,
+                                        standardizedFallback = standardized,
+                                        rotationDegrees = rotationDegrees
+                                    )
+                                }
+                                Pair(omrDeferred.await(), qrDeferred.await())
+                            }
+                        }
+
+                        val annotatedBitmap = OMRExtractor.renderAnnotatedImage(standardized, template, report, decodedQrText)
                         val filledOneBased = report.allFilled.map { it + 1 }
 
                         val mockId = "VOTER001"
@@ -522,9 +544,14 @@ fun ScannerScreen() {
                             filledBubbleIndices = filledOneBased
                             bubbleReadConfidence = report.overallConfidence
                             bubbleTemplateName = template.name
+                            qrTokenText = decodedQrText
                             voterId = mockId
                             voterName = mockName
-                            captureStatus = "Success! ${report.allFilled.size} marked."
+                            captureStatus = if (decodedQrText != null) {
+                                "Success! ${report.allFilled.size} marked, QR read."
+                            } else {
+                                "Success! ${report.allFilled.size} marked. QR not read."
+                            }
                             val attempts = metricsRef.attempts.coerceAtLeast(1)
                             val rejectRate = (metricsRef.qualityRejects * 100f) / attempts
                             metricsLine = "Attempts: ${metricsRef.attempts} | Success: ${metricsRef.successes} | " +
@@ -594,8 +621,9 @@ fun ScannerScreen() {
             filledIndices = filledBubbleIndices,
             voterId = voterId,
             voterName = voterName,
-            onDismiss = { transformedCaptureBitmap = null },
-            onAccept = { transformedCaptureBitmap = null },
+            qrToken = qrTokenText,
+            onDismiss = { transformedCaptureBitmap = null; qrTokenText = null },
+            onAccept = { transformedCaptureBitmap = null; qrTokenText = null },
             brandGold = brandGold,
             cardColor = white,
             background = white,
@@ -779,6 +807,7 @@ private fun VerificationDialog(
     filledIndices: List<Int>,
     voterId: String,
     voterName: String,
+    qrToken: String?,
     onDismiss: () -> Unit,
     onAccept: () -> Unit,
     brandGold: Color,
@@ -830,6 +859,33 @@ private fun VerificationDialog(
                     }
                     Spacer(Modifier.height(16.dp))
                 }
+
+                // QR token card — shown whenever a scan attempt happened, success or not,
+                // so the operator can see at a glance whether the ballot's QR was read.
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (qrToken != null) background else Color(0xFFFFF3E0)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "QR Token",
+                            color = if (qrToken != null) brandGold else Color(0xFFE65100),
+                            fontSize = 12.sp
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = qrToken ?: "Not detected",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            color = if (qrToken != null) textColor else Color(0xFFE65100)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
 
                 // OMR image preview
                 Card(
