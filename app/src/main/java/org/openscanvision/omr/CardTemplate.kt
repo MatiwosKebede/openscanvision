@@ -2,14 +2,6 @@ package org.openscanvision.omr
 
 import android.graphics.PointF
 
-/**
- * Card template definitions.
- * All coordinates are in 0.1 mm units (85 mm × 54 mm → 850 × 540).
- *
- * ArUco markers (5 mm × 5 mm) are placed 1.2 mm from the edges.
- * - Marker IDs: 0 = TL, 1 = TR, 2 = BR, 3 = BL.
- * - Marker corners are used for homography calculation.
- */
 data class CardTemplate(
     val name: String,
     val prefix: String,
@@ -31,7 +23,7 @@ object Templates {
         PointF(592.5f, 187.5f)   // BL
     )
 
-    // Marker centres (for centroid fallback)
+    // Marker centres (unchanged)
     val SHARED_MARKER_CENTRES = listOf(
         PointF(37f, 37f),      // TL
         PointF(813f, 37f),     // TR
@@ -39,7 +31,7 @@ object Templates {
         PointF(37f, 503f)      // BL
     )
 
-    // ArUco marker corners (5mm squares, 1.2mm inset)
+    // ArUco marker corners (unchanged)
     val ARUCO_TEMPLATE_CORNERS: Map<Int, List<PointF>> = mapOf(
         0 to listOf(PointF(12f, 12f), PointF(62f, 12f), PointF(62f, 62f), PointF(12f, 62f)),
         1 to listOf(PointF(788f, 12f), PointF(838f, 12f), PointF(838f, 62f), PointF(788f, 62f)),
@@ -55,15 +47,25 @@ object Templates {
         qrRefCorners = SHARED_QR_CORNERS,
         markerRefPositions = SHARED_MARKER_CENTRES,
         bubbleGroups = CANDIDATE_GROUPS,
+        // Grid: [1,2,3], [4,5,6], [7,8,9], [10,11,12]
+        // Bubbles 11 & 12 shifted down by 0.5 mm (5 units)
         bubblePositions = listOf(
-            PointF(64f, 247f), PointF(297f, 247f), PointF(530f, 247f),
-            PointF(64f, 307f), PointF(297f, 307f), PointF(530f, 307f),
-            PointF(64f, 367f), PointF(297f, 367f), PointF(530f, 367f),
-            PointF(64f, 427f), PointF(297f, 427f), PointF(530f, 427f)
+            PointF(90.2f, 264.2f),   // 1
+            PointF(325.2f, 264.2f),  // 2
+            PointF(577.2f, 264.2f),  // 3
+            PointF(90.2f, 329.2f),   // 4
+            PointF(328.2f, 329.2f),  // 5
+            PointF(577.2f, 329.2f),  // 6
+            PointF(90.2f, 393.2f),   // 7
+            PointF(328.2f, 393.2f),  // 8
+            PointF(577.2f, 393.2f),  // 9
+            PointF(90.2f, 455.2f),   // 10
+            PointF(328.2f, 455.2f),  // 11 (Y +5)
+            PointF(577.2f, 455.2f)   // 12 (Y +5)
         )
     )
 
-    // Agenda card: 4 rows, each with label column + 3 option columns
+    // Agenda card: unchanged
     val AGENDA_GROUPS = listOf(0..2, 3..5, 6..8, 9..11)
     val AGENDA = CardTemplate(
         name = "Agenda",
@@ -72,10 +74,10 @@ object Templates {
         markerRefPositions = SHARED_MARKER_CENTRES,
         bubbleGroups = AGENDA_GROUPS,
         bubblePositions = listOf(
-            PointF(277f, 247f), PointF(457f, 247f), PointF(637f, 247f),
-            PointF(277f, 307f), PointF(457f, 307f), PointF(637f, 307f),
-            PointF(277f, 367f), PointF(457f, 367f), PointF(637f, 367f),
-            PointF(277f, 427f), PointF(457f, 427f), PointF(637f, 427f)
+            PointF(303.2f, 264.2f), PointF(486.2f, 264.2f), PointF(668.2f, 264.2f),
+            PointF(303.2f, 324.2f), PointF(486.2f, 324.2f), PointF(668.2f, 324.2f),
+            PointF(303.2f, 384.2f), PointF(486.2f, 384.2f), PointF(668.2f, 384.2f),
+            PointF(303.2f, 444.2f), PointF(486.2f, 444.2f), PointF(668.2f, 444.2f)
         )
     )
 
