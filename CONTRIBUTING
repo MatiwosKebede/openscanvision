@@ -1,4 +1,200 @@
-# CONTRIBUTING – OpenScanVision Contributor Guidelines
+# Contributing to OpenScanVision
+
+First off, thank you for considering contributing to OpenScanVision! 🎉  
+It's people like you that make open-source projects great. Whether you're fixing a bug, adding a feature, improving documentation, or reporting an issue – every contribution is valuable.
+
+We welcome contributors of all skill levels. This guide will help you get started.
+
+
+## Table of Contents
+
+- [Code of Conduct](#code-of-conduct)
+- [How Can I Contribute?](#how-can-i-contribute)
+- [Reporting Bugs](#reporting-bugs)
+- [Suggesting Enhancements](#suggesting-enhancements)
+- [Your First Contribution](#your-first-contribution)
+- [Development Setup](#development-setup)
+- [Code Style Guidelines](#code-style-guidelines)
+- [Testing](#testing)
+- [Pull Request Process](#pull-request-process)
+- [Issue Labels](#issue-labels)
+- [Getting Help](#getting-help)
+
+
+
+## Code of Conduct
+
+This project and everyone participating in it is governed by the **Contributor Covenant Code of Conduct**. By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers.
+
+
+## How Can I Contribute?
+
+### Reporting Bugs
+
+If you find a bug, please open an issue and include:
+
+- A clear and descriptive title.
+- Steps to reproduce the bug.
+- Expected behaviour and what actually happened.
+- Screenshots or screen recordings (if applicable).
+- Device model, Android version, and library version.
+- Logcat output (if relevant).
+
+**Before opening a new issue**, please check if the bug has already been reported.
+
+### Suggesting Enhancements
+
+We welcome suggestions for new features or improvements. When suggesting an enhancement:
+
+- Explain the problem you're trying to solve.
+- Describe your proposed solution.
+- Provide any alternative solutions you considered.
+- Explain how this would benefit other users.
+
+### Your First Contribution
+
+If this is your first time contributing to open-source, we recommend starting with issues labelled:
+
+- **`good-first-issue`** – small, well-scoped tasks ideal for newcomers.
+- **`help-wanted`** – tasks that need attention but may require a bit more context.
+
+Don't hesitate to ask questions – we're here to help you get started.
+
+
+## Development Setup
+
+### Prerequisites
+
+- Android Studio (latest stable version recommended)
+- JDK 11 or higher
+- Android SDK with API 24+
+- A physical Android device with a camera (for testing)
+
+### Setting Up the Project
+
+1. **Fork the repository** on GitHub.
+2. **Clone your fork**:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/OpenScanVision.git
+   cd OpenScanVision
+   ```
+3. **Add the upstream remote**:
+   ```bash
+   git remote add upstream https://github.com/MatiwosKebede/OpenScanVision.git
+   ```
+4. **Open the project** in Android Studio.
+5. **Let Gradle sync** – it will download all dependencies.
+6. **Run the `sample` module** on a device to verify the setup works.
+
+### Building the Project
+
+```bash
+# Clean and build everything
+./gradlew clean build
+
+# Build only the core library
+./gradlew :openscanvision-core:assemble
+
+# Build the sample app
+./gradlew :sample:assembleDebug
+
+# Run tests
+./gradlew test
+./gradlew connectedAndroidTest
+```
+
+
+## Code Style Guidelines
+
+We follow the official [Kotlin coding conventions](https://kotlinlang.org/docs/coding-conventions.html) with a few additions:
+
+- **Indentation**: 4 spaces (no tabs).
+- **Line length**: Max 120 characters.
+- **Imports**: Avoid wildcard imports (`import android.*`).
+- **Naming**: 
+  - Classes: `PascalCase`
+  - Functions and properties: `camelCase`
+  - Constants: `UPPER_SNAKE_CASE`
+- **Documentation**: Add KDoc comments for all public APIs.
+
+We use **ktlint** to enforce code style. Run it before submitting:
+
+```bash
+./gradlew ktlintCheck
+```
+
+
+## Testing
+
+Please ensure your changes are covered by tests:
+
+- **Unit tests**: For logic that doesn't require Android (e.g., `OMRExtractor`).
+- **Instrumented tests**: For camera, OpenCV, and UI interactions.
+
+We aim for at least **70% test coverage** for new code.
+
+Run tests locally:
+
+```bash
+./gradlew test                 # Unit tests
+./gradlew connectedAndroidTest # Instrumented tests
+```
+
+
+## Pull Request Process
+
+1. **Keep it focused**: One feature or bug fix per PR.
+2. **Update documentation**: If you add or change a public API, update the README and KDoc.
+3. **Add tests**: New features should include tests.
+4. **Pass CI**: Ensure all checks pass (build, tests, lint).
+5. **Write a clear PR description**:
+   - What does this PR do?
+   - Why is it needed?
+   - How was it tested?
+   - Any breaking changes?
+
+### PR Checklist
+
+- [ ] I have read the [CONTRIBUTING](CONTRIBUTING) guide.
+- [ ] My code follows the project's code style.
+- [ ] I have added tests that prove my fix/feature works.
+- [ ] I have updated the documentation accordingly.
+- [ ] All new and existing tests pass.
+- [ ] I have reviewed my own code before submitting.
+
+
+## Issue Labels
+
+We use labels to organise issues:
+
+| Label | Description |
+|-------|-------------|
+| `bug` | Something isn't working. |
+| `enhancement` | New feature or improvement. |
+| `good-first-issue` | Good for newcomers. |
+| `help-wanted` | Extra attention needed. |
+| `documentation` | Docs or README updates. |
+| `question` | Further information is requested. |
+| `wontfix` | This will not be worked on. |
+| `duplicate` | This issue already exists. |
+
+
+## Getting Help
+
+If you need help, you can:
+
+- Ask in the **issue comments**.
+- Join the discussion in **GitHub Discussions** (if enabled).
+- Reach out to the maintainer directly.
+
+
+## Recognition
+
+All contributors will be acknowledged in the project's [README](README.md) and release notes. Thank you for making OpenScanVision better!
+
+
+**Thank you for contributing!** 🚀  
+Together, we can make OpenScanVision the best OMR+QR library for Android.# CONTRIBUTING – OpenScanVision Contributor Guidelines
 
 Thank you for your interest in contributing to OpenScanVision! We welcome bug reports, feature requests, documentation improvements, and code contributions.
 
