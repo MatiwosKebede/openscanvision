@@ -1,124 +1,152 @@
 # Contributing to OpenScanVision
 
-First off, thank you for considering contributing to OpenScanVision! 🎉  
-It's people like you that make open-source projects great. Whether you're fixing a bug, adding a feature, improving documentation, or reporting an issue – every contribution is valuable.
+First off, thank you for considering contributing to OpenScanVision! It's people like you that make this project better and help it grow. Whether you are reporting a bug, suggesting a feature, or submitting a pull request – your contribution is genuinely appreciated.
 
-We welcome contributors of all skill levels. This guide will help you get started.
+We follow the standard [GitHub flow](https://guides.github.com/introduction/flow/) for contributions. Please read this document before submitting any changes.
 
 
 ## Table of Contents
-
 - [Code of Conduct](#code-of-conduct)
-- [How Can I Contribute?](#how-can-i-contribute)
+- [Ways to Contribute](#ways-to-contribute)
 - [Reporting Bugs](#reporting-bugs)
 - [Suggesting Enhancements](#suggesting-enhancements)
-- [Your First Contribution](#your-first-contribution)
 - [Development Setup](#development-setup)
-- [Code Style Guidelines](#code-style-guidelines)
+- [Pull Request Guidelines](#pull-request-guidelines)
+- [Code Style](#code-style)
 - [Testing](#testing)
-- [Pull Request Process](#pull-request-process)
-- [Issue Labels](#issue-labels)
+- [Commit Messages](#commit-messages)
 - [Getting Help](#getting-help)
-
 
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by the **Contributor Covenant Code of Conduct**. By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers.
+This project and everyone participating in it is governed by the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). By participating, you are expected to uphold this code. Please report unacceptable behavior to [matiwoskebede01@gmail.com](mailto:matiwoskebede01@gmail.com).
+
+## Ways to Contribute
+
+We welcome contributions of all kinds. Here are some ways you can help:
+
+- **Report bugs** – if you find a bug, please let us know by opening an issue.
+- **Suggest enhancements** – have an idea for a new feature or improvement? Open an issue and tell us.
+- **Improve documentation** – if you find any part of the documentation confusing or incomplete, please help us improve it.
+- **Submit pull requests** – whether it's a bug fix, a new feature, or a documentation update, we welcome your code.
+- **Share the project** – if you find OpenScanVision useful, please share it with others and star it on GitHub.
+
+---
+
+## Reporting Bugs
+
+If you find a bug, please open an issue on GitHub with the following information:
+
+- **Title** – a clear, concise description of the issue.
+- **Description** – what happened, what you expected to happen, and steps to reproduce.
+- **Environment** – device model, Android version, camera used, lighting conditions, card type.
+- **Logs** – any relevant logcat output or error messages.
+- **Screenshots** – if applicable, attach screenshots of the issue.
+
+Please search the existing issues before opening a new one to avoid duplicates.
 
 
-## How Can I Contribute?
+## Suggesting Enhancements
 
-### Reporting Bugs
+We are always looking to improve OpenScanVision. If you have an idea for a new feature or enhancement, please open an issue with:
 
-If you find a bug, please open an issue and include:
+- **Title** – a clear, concise description of your suggestion.
+- **Description** – what problem it solves, how it works, and why it would be valuable.
+- **Alternatives** – any alternative solutions you have considered.
 
-- A clear and descriptive title.
-- Steps to reproduce the bug.
-- Expected behaviour and what actually happened.
-- Screenshots or screen recordings (if applicable).
-- Device model, Android version, and library version.
-- Logcat output (if relevant).
-
-**Before opening a new issue**, please check if the bug has already been reported.
-
-### Suggesting Enhancements
-
-We welcome suggestions for new features or improvements. When suggesting an enhancement:
-
-- Explain the problem you're trying to solve.
-- Describe your proposed solution.
-- Provide any alternative solutions you considered.
-- Explain how this would benefit other users.
-
-### Your First Contribution
-
-If this is your first time contributing to open-source, we recommend starting with issues labelled:
-
-- **`good-first-issue`** – small, well-scoped tasks ideal for newcomers.
-- **`help-wanted`** – tasks that need attention but may require a bit more context.
-
-Don't hesitate to ask questions – we're here to help you get started.
+We will review your suggestion and provide feedback as soon as possible.
 
 
 ## Development Setup
 
+To set up the project for local development:
+
 ### Prerequisites
-
-- Android Studio (latest stable version recommended)
+- Android Studio (latest version recommended)
 - JDK 11 or higher
-- Android SDK with API 24+
-- A physical Android device with a camera (for testing)
+- Android SDK with API 24 or higher
+- A physical Android device with a camera (emulators are not recommended)
 
-### Setting Up the Project
-
-1. **Fork the repository** on GitHub.
-2. **Clone your fork**:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/OpenScanVision.git
-   cd OpenScanVision
-   ```
-3. **Add the upstream remote**:
-   ```bash
-   git remote add upstream https://github.com/MatiwosKebede/OpenScanVision.git
-   ```
-4. **Open the project** in Android Studio.
-5. **Let Gradle sync** – it will download all dependencies.
-6. **Run the `sample` module** on a device to verify the setup works.
-
-### Building the Project
-
+### Clone the Repository
 ```bash
-# Clean and build everything
+git clone https://github.com/MatiwosKebede/OpenScanVision.git
+cd OpenScanVision
+```
+
+### Build the Project
+```bash
 ./gradlew clean build
+```
 
-# Build only the core library
-./gradlew :openscanvision-core:assemble
+### Run the Sample App
+1. Open the project in Android Studio.
+2. Select the `sample` module as the run target.
+3. Connect a physical device and run the app.
 
-# Build the sample app
-./gradlew :sample:assembleDebug
-
-# Run tests
+### Run Tests
+```bash
 ./gradlew test
-./gradlew connectedAndroidTest
 ```
 
 
-## Code Style Guidelines
+## Pull Request Guidelines
 
-We follow the official [Kotlin coding conventions](https://kotlinlang.org/docs/coding-conventions.html) with a few additions:
+When submitting a pull request, please follow these guidelines:
 
-- **Indentation**: 4 spaces (no tabs).
-- **Line length**: Max 120 characters.
-- **Imports**: Avoid wildcard imports (`import android.*`).
-- **Naming**: 
-  - Classes: `PascalCase`
-  - Functions and properties: `camelCase`
-  - Constants: `UPPER_SNAKE_CASE`
-- **Documentation**: Add KDoc comments for all public APIs.
+### Step 1: Fork the Repository
+Fork the repository on GitHub and clone your fork locally.
 
-We use **ktlint** to enforce code style. Run it before submitting:
+### Step 2: Create a Feature Branch
+Create a new branch for your feature or bug fix:
+```bash
+git checkout -b feature/your-feature-name
+```
 
+### Step 3: Make Your Changes
+Make your changes, following the [code style guidelines](#code-style).
+
+### Step 4: Test Your Changes
+Run the tests to ensure your changes don't break anything:
+```bash
+./gradlew clean build
+```
+If you've added new functionality, please add tests.
+
+### Step 5: Commit Your Changes
+Write a clear commit message (see [commit messages](#commit-messages) below).
+
+### Step 6: Push to Your Fork
+```bash
+git push origin feature/your-feature-name
+```
+
+### Step 7: Open a Pull Request
+1. Go to the main repository on GitHub.
+2. Click on "Pull Requests" and then "New Pull Request".
+3. Select your branch from the compare dropdown.
+4. Fill in the pull request template (if applicable) and provide a clear description of your changes.
+5. Submit the pull request.
+
+### What We Look For in Pull Requests
+- **Clear description** – explain what you changed and why.
+- **Focused changes** – keep each pull request focused on a single topic.
+- **No breaking changes** – unless absolutely necessary, ensure backward compatibility.
+- **Updated documentation** – if you change the API, update the documentation accordingly.
+- **Added tests** – new features should include tests.
+
+
+## Code Style
+
+We follow the official [Kotlin coding conventions](https://kotlinlang.org/docs/coding-conventions.html). Here are some key points:
+
+- **Indentation** – use 4 spaces, not tabs.
+- **Naming** – use `CamelCase` for classes and functions; `snake_case` for constants.
+- **Imports** – organise imports alphabetically.
+- **No unused imports** – remove any unused imports.
+- **Comments** – use `//` for line comments and `/** */` for KDoc.
+
+We use [ktlint](https://github.com/pinterest/ktlint) to enforce code style. You can run it locally before committing:
 ```bash
 ./gradlew ktlintCheck
 ```
@@ -126,120 +154,73 @@ We use **ktlint** to enforce code style. Run it before submitting:
 
 ## Testing
 
-Please ensure your changes are covered by tests:
+We strongly encourage writing tests for any new functionality or bug fixes. The project uses:
 
-- **Unit tests**: For logic that doesn't require Android (e.g., `OMRExtractor`).
-- **Instrumented tests**: For camera, OpenCV, and UI interactions.
+- **Unit tests** – for testing OMR, QR, and card detection logic (under `src/test`).
+- **Instrumented tests** – for testing camera integration and UI (under `src/androidTest`).
 
-We aim for at least **70% test coverage** for new code.
-
-Run tests locally:
-
+### Running Tests
 ```bash
-./gradlew test                 # Unit tests
-./gradlew connectedAndroidTest # Instrumented tests
+# Run unit tests
+./gradlew test
+
+# Run instrumented tests (requires a connected device)
+./gradlew connectedAndroidTest
 ```
 
-
-## Pull Request Process
-
-1. **Keep it focused**: One feature or bug fix per PR.
-2. **Update documentation**: If you add or change a public API, update the README and KDoc.
-3. **Add tests**: New features should include tests.
-4. **Pass CI**: Ensure all checks pass (build, tests, lint).
-5. **Write a clear PR description**:
-   - What does this PR do?
-   - Why is it needed?
-   - How was it tested?
-   - Any breaking changes?
-
-### PR Checklist
-
-- [ ] I have read the [CONTRIBUTING](CONTRIBUTING) guide.
-- [ ] My code follows the project's code style.
-- [ ] I have added tests that prove my fix/feature works.
-- [ ] I have updated the documentation accordingly.
-- [ ] All new and existing tests pass.
-- [ ] I have reviewed my own code before submitting.
+If you add new functionality, please add tests to cover it. If you fix a bug, consider adding a test that reproduces the issue and verifies the fix.
 
 
-## Issue Labels
+## Commit Messages
 
-We use labels to organise issues:
+We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification for commit messages. This helps automate versioning and changelog generation.
 
-| Label | Description |
-|-------|-------------|
-| `bug` | Something isn't working. |
-| `enhancement` | New feature or improvement. |
-| `good-first-issue` | Good for newcomers. |
-| `help-wanted` | Extra attention needed. |
-| `documentation` | Docs or README updates. |
-| `question` | Further information is requested. |
-| `wontfix` | This will not be worked on. |
-| `duplicate` | This issue already exists. |
+### Format
+```
+<type>(<scope>): <subject>
+
+[optional body]
+
+[optional footer]
+```
+
+### Types
+- `feat` – a new feature.
+- `fix` – a bug fix.
+- `docs` – documentation only changes.
+- `style` – changes that do not affect the meaning of the code (whitespace, formatting, etc.).
+- `refactor` – a code change that neither fixes a bug nor adds a feature.
+- `perf` – a code change that improves performance.
+- `test` – adding missing tests or correcting existing tests.
+- `chore` – changes to the build process or auxiliary tools.
+
+### Examples
+```
+feat: add multi-frame averaging for improved accuracy
+```
+```
+fix: resolve crash when QR code is not detected
+```
+```
+docs: update README with library integration instructions
+```
 
 
 ## Getting Help
 
-If you need help, you can:
+If you have any questions about the project or the contribution process, please:
 
-- Ask in the **issue comments**.
-- Join the discussion in **GitHub Discussions** (if enabled).
-- Reach out to the maintainer directly.
+- Open an [issue on GitHub](https://github.com/MatiwosKebede/OpenScanVision/issues).
+- Contact the maintainer directly at [matiwoskebede01@gmail.com](mailto:matiwoskebede01@gmail.com).
 
-
-## Recognition
-
-All contributors will be acknowledged in the project's [README](README.md) and release notes. Thank you for making OpenScanVision better!
+We try to respond within 48 hours.
 
 
-**Thank you for contributing!** 🚀  
-Together, we can make OpenScanVision the best OMR+QR library for Android.# CONTRIBUTING – OpenScanVision Contributor Guidelines
+## Thank You
 
-Thank you for your interest in contributing to OpenScanVision! We welcome bug reports, feature requests, documentation improvements, and code contributions.
+Thank you for taking the time to contribute to OpenScanVision. Your contributions, big or small, are what make this project great. We look forward to your ideas, bug reports, and pull requests.
 
-## How to Contribute
-1. Fork the repository.
-2. Create a new branch for your feature or fix:
-   ```
-   git checkout -b feature/your-feature-name
-   ```
-3. Make your changes following the guidelines below.
-4. Test your changes thoroughly on a physical device (or emulator with camera).
-5. Commit with a clear and descriptive message.
-6. Push to your fork and open a Pull Request against the `main` branch.
+**Happy coding!**
 
-## Code Style
-- **Kotlin**: Follow the official Kotlin coding conventions (IntelliJ default).
-- **Compose**: Prefer `@Composable` functions over classes; keep UI logic separate from business logic.
-- **Naming**: Use clear, descriptive names for variables, functions, and classes.
-- **Comments**: Add KDoc comments for public APIs and explain non‑obvious logic.
 
-## Testing
-- Unit tests for utility functions (e.g., `ImagePreprocessor`, `ScannerUtils`) are encouraged.
-- Manual testing with printed cards is essential for OMR changes.
-- If you add a new card template, include a sample QR code and test it.
-
-## Reporting Issues
-- Use the GitHub issue tracker.
-- Provide a clear description, steps to reproduce, device model, Android version, and if possible, a screenshot or logcat output.
-
-## Feature Requests
-- Open an issue with the label `enhancement`.
-- Describe the use case and why it would benefit the project.
-
-## Pull Request Checklist
-Before submitting your PR, ensure:
-- [ ] Code compiles and runs without errors.
-- [ ] All existing features still work (no regressions).
-- [ ] New features are documented in the appropriate files (README, code comments).
-- [ ] No unnecessary debug logs or commented code remain.
-- [ ] Your commit history is clean (squash if needed).
-
-## License
-By contributing, you agree that your contributions will be licensed under the MIT License.
-
-## Contact
-If you have any questions, feel free to open a discussion or reach out via the issue tracker.
-
-We appreciate your help in making OpenScanVision better!
+Built with dedication by **Matiwos Kebede** and the OpenScanVision community.
