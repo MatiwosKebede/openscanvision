@@ -1,6 +1,8 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
+
 }
 
 android {
@@ -32,21 +34,32 @@ android {
 }
 
 dependencies {
-    // ✅ OpenCV – exposed to users
+    // ─── Core dependencies (exposed to consumers) ──────────────
     api("com.quickbirdstudios:opencv-contrib:4.5.3.0")
 
-    // ✅ ML Kit for QR – internal
+    // ─── Internal dependencies (not exposed) ────────────────────
     implementation("com.google.mlkit:barcode-scanning:17.2.0")
     implementation("com.google.android.gms:play-services-tasks:18.1.0")
-
-    // ✅ JSON and Coroutines – internal
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // ❌ NO CameraX, NO Compose, NO UI
-
-    // Testing
+    // ─── Testing ─────────────────────────────────────────────────
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+}
+
+// ─── Publishing configuration (JitPack / Maven Central) ─────────
+publishing {
+    publications {
+        create<MavenPublication>("release") {
+            groupId = "org.openscanvision"
+            artifactId = "core"
+            version = "1.0.0"
+
+            afterEvaluate {
+                from(components["release"])
+            }
+        }
+    }
 }

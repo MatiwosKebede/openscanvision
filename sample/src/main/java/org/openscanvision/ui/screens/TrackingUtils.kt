@@ -8,6 +8,7 @@ import org.opencv.core.Mat
 import org.openscanvision.core.internal.omr.CardDetector
 import org.openscanvision.core.internal.omr.Templates
 import java.nio.ByteBuffer
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 private const val TAG = "TrackingUtils"
@@ -158,7 +159,7 @@ fun markerArea(corners: List<PointF>): Float {
         val next = corners[(i + 1) % corners.size]
         area += corners[i].x * next.y - next.x * corners[i].y
     }
-    return kotlin.math.abs(area) * 0.5f
+    return abs(area) * 0.5f
 }
 
 fun validateCaptureQuality(
@@ -183,7 +184,19 @@ fun validateCaptureQuality(
     return Pair(true, "")
 }
 
-// ─── Main tracking update (no overlay) ──────────────────────────────
+// ─── Polygon area validation ──────────────────────────────────────
+fun polygonArea(corners: List<PointF>): Float {
+    if (corners.size < 3) return 0f
+    var area = 0f
+    for (i in corners.indices) {
+        val j = (i + 1) % corners.size
+        area += corners[i].x * corners[j].y
+        area -= corners[j].x * corners[i].y
+    }
+    return abs(area) * 0.5f
+}
+
+// ─── Main tracking update ──────────────────────────────────────────
 
 fun updateTracking(
     gray: Mat,
