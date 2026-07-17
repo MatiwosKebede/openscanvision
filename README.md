@@ -69,6 +69,15 @@ Built with [OpenCV](https://opencv.org/), [CameraX](https://developer.android.co
 
 - **Optimised Performance** – Lightweight frame processing (640×360 tracking, 850×540 warp) with configurable resolution trade‑offs.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/original_image.jpg" width="300" alt="Original card image">
+  <img src="docs/processed_image.jpg" width="300" alt="Processed image with bubble detection">
+</p>
+<p align="center">
+  <em>Left: Original camera frame with card detected – Right: Annotated result with filled bubbles highlighted</em>
+</p>
 
 ## Project Structure
 
