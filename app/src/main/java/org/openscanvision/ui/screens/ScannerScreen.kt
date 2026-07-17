@@ -14,7 +14,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -29,7 +28,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -49,16 +47,13 @@ import org.openscanvision.core.internal.omr.Templates
 import org.openscanvision.core.internal.omr.OMRExtractor
 import org.openscanvision.core.internal.omr.OpenCVUtils
 import org.openscanvision.core.internal.qr.QrDecoder
-import org.openscanvision.ui.components.StaticViewfinder
 import org.openscanvision.ui.theme.NIBGold
 import org.openscanvision.utils.toBitmap
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 
-private const val TAG = "ArUcoScanner"
-
-// ─── Optimised constants ────────────────────────────────────────────
+private const val TAG = "ScannerScreen"
 private const val MAX_FRAMES_BEFORE_RESCAN = 120
 private const val LOW_CONF_FRAMES_BEFORE_RESCAN = 10
 private const val BASE_TRACK_HALF_SIZE = 55
@@ -288,10 +283,8 @@ fun ScannerScreen() {
         hasCameraPermission = it
     }
 
-    var detectedMarkers by remember { mutableStateOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) }
-    var isTracking by remember { mutableStateOf(false) }
     var transformedCaptureBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var filledBubbleIndices by remember { mutableStateOf<List<Int>>(emptyList()) }  // 1‑based
+    var filledBubbleIndices by remember { mutableStateOf<List<Int>>(emptyList()) }
     var bubbleReadConfidence by remember { mutableStateOf(0f) }
     var bubbleTemplateName by remember { mutableStateOf<String?>(null) }
     var qrTokenText by remember { mutableStateOf<String?>(null) }
@@ -299,7 +292,6 @@ fun ScannerScreen() {
     var metricsLine by remember { mutableStateOf("Attempts: 0 | Success: 0 | Avg lock: 0f | Avg time: 0ms | Reject: 0.0%") }
     val captureRequestedRef = remember { AtomicBoolean(false) }
 
-    // Mock voter details
     var voterId by remember { mutableStateOf("") }
     var voterName by remember { mutableStateOf("") }
 
@@ -313,7 +305,6 @@ fun ScannerScreen() {
     val markerAge = remember { mutableMapOf<Int, Int>() }
     val lastKnownCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }
     val previousCentresRef = remember { arrayOf<Map<Int, PointF>>(emptyMap()) }
-    val smoothedMarkersRef = remember { arrayOf<Map<Int, Pair<Offset, List<Offset>>>>(emptyMap()) }
     val framesSinceFullScanRef = remember { intArrayOf(MAX_FRAMES_BEFORE_RESCAN) }
     val stableFrameCounter = remember { intArrayOf(0) }
     val autoCaptureCooldownRef = remember { intArrayOf(0) }
@@ -446,32 +437,7 @@ fun ScannerScreen() {
                         coroutineScope.launch(Dispatchers.Main) { captureStatus = "Auto-capturing on stable card..." }
                     }
 
-                    val rawScreenMarkers = mutableMapOf<Int, Pair<Offset, List<Offset>>>()
-                    for ((id, corners) in arUcoMap) {
-                        val sensorCorners = mapBitmapPointsToSensor(corners, bufferWidth, bufferHeight, rotationDegrees)
-                        val screenCorners = mapImageToScreen(sensorCorners.map { point -> Offset(point.x, point.y) }, rotatedWidth, rotatedHeight, previewView)
-                        if (screenCorners != null && screenCorners.size == 4) {
-                            val centreX = screenCorners.map { it.x }.average().toFloat()
-                            val centreY = screenCorners.map { it.y }.average().toFloat()
-                            rawScreenMarkers[id] = Pair(Offset(centreX, centreY), screenCorners)
-                        }
-                    }
-                    val prevSmoothed = smoothedMarkersRef[0]
-                    val smoothed = rawScreenMarkers.mapValues { (id, raw) ->
-                        val prev = prevSmoothed[id]
-                        if (prev == null) raw else {
-                            val (rawCentre, rawCorners) = raw
-                            val (prevCentre, prevCorners) = prev
-                            val a = DISPLAY_SMOOTHING_ALPHA
-                            val newCentre = Offset(prevCentre.x + a * (rawCentre.x - prevCentre.x), prevCentre.y + a * (rawCentre.y - prevCentre.y))
-                            val newCorners = rawCorners.indices.map { i -> Offset(prevCorners[i].x + a * (rawCorners[i].x - prevCorners[i].x), prevCorners[i].y + a * (rawCorners[i].y - prevCorners[i].y)) }
-                            Pair(newCentre, newCorners)
-                        }
-                    }
-                    smoothedMarkersRef[0] = smoothed
-                    coroutineScope.launch(Dispatchers.Main) { detectedMarkers = smoothed; isTracking = smoothed.isNotEmpty() }
-
-                    // ─── CAPTURE BLOCK (using low-level core APIs) ──────────
+                    // ─── CAPTURE BLOCK ──────────────────────────────────────
                     if (captureRequestedRef.compareAndSet(true, false)) {
                         metricsRef.attempts++
                         val captureValidation = validateCaptureQuality(arUcoMap, markerConfidence)
@@ -500,7 +466,6 @@ fun ScannerScreen() {
                             return@setAnalyzer
                         }
 
-                        // ─── Use corners from ArUco, fallback to edge detection ───
                         val cardCorners = cardCornersFromArUco(arUcoMap) ?: CardDetector.detectCardCorners(frameBitmap)
                         if (cardCorners == null || cardCorners.size != 4) {
                             retryPendingRef[0] = 1
@@ -511,7 +476,6 @@ fun ScannerScreen() {
                             return@setAnalyzer
                         }
 
-                        // ─── Warp using OpenCVUtils from core ──────────────────────
                         val warped = OpenCVUtils.warpCard(frameBitmap, cardCorners, Templates.REF_WIDTH, Templates.REF_HEIGHT)
                         if (warped == null) {
                             retryPendingRef[0] = 1
@@ -522,18 +486,15 @@ fun ScannerScreen() {
                             return@setAnalyzer
                         }
 
-                        // ─── Preprocess ──────────────────────────────────────────────
                         val cleaned = ImagePreprocessor.enhanceContrast(warped)
                         val standardized = ImagePreprocessor.denoise(cleaned)
 
-                        // ─── OMR and QR (independent) ────────────────────────────────
                         coroutineScope.launch {
-                            val template = Templates.CANDIDATE  // or detect from QR if needed
+                            val template = Templates.CANDIDATE
 
                             val omrDeferred = async(Dispatchers.Default) {
                                 OMRExtractor.readBubbleGroupsDetailed(standardized, template)
                             }
-                            // ✅ QR decoding – no rotationDegrees, returns Pair
                             val qrDeferred = async(Dispatchers.Default) {
                                 QrDecoder.decodeFromOriginalFrame(
                                     frameBitmap = frameBitmap,
@@ -544,12 +505,11 @@ fun ScannerScreen() {
 
                             val report = omrDeferred.await()
                             val qrResult = qrDeferred.await()
-                            val decodedQrText = qrResult?.first  // extract text from Pair
+                            val decodedQrText = qrResult?.first
 
                             val annotatedBitmap = OMRExtractor.renderAnnotatedImage(standardized, template, report, decodedQrText)
                             val filledOneBased = report.allFilled.map { it + 1 }
 
-                            // Update metrics
                             metricsRef.successes++
                             if (lockStartFrameRef[0] != -1) {
                                 metricsRef.totalLockFrames += (frameCounter - lockStartFrameRef[0])
@@ -562,7 +522,7 @@ fun ScannerScreen() {
                                 bubbleReadConfidence = report.overallConfidence
                                 bubbleTemplateName = template.name
                                 qrTokenText = decodedQrText
-                                voterId = "VOTER001"   // replace with real extraction
+                                voterId = "VOTER001"
                                 voterName = "Abebech Demissie"
                                 captureStatus = if (decodedQrText != null) {
                                     "Success! ${report.allFilled.size} marked, QR read."
@@ -591,7 +551,7 @@ fun ScannerScreen() {
         }
     }
 
-    // ─── Theme ──────────────────────────────────────────────────────
+    // ─── UI ──────────────────────────────────────────────────────
     val brandGold = Color(0xFFC9A237)
     val darkBrown = Color(0xFF1A0D02)
     val white = Color.White
@@ -617,10 +577,8 @@ fun ScannerScreen() {
         } else {
             Box(modifier = Modifier.fillMaxSize()) {
                 AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-                StaticViewfinder()
-                ArUcoMarkersOverlay(detectedMarkers, brandGold)
                 BottomHud(
-                    isTracking = isTracking,
+                    isTracking = true,
                     captureStatus = captureStatus,
                     metricsLine = metricsLine,
                     onForceScan = { captureRequestedRef.set(true) },
@@ -737,28 +695,6 @@ private fun ErrorScreen(
 }
 
 @Composable
-private fun ArUcoMarkersOverlay(markers: Map<Int, Pair<Offset, List<Offset>>>, brandGold: Color) {
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        markers.forEach { (_, markerData) ->
-            val (_, screenCorners) = markerData
-            if (screenCorners.size == 4) {
-                val path = Path().apply {
-                    moveTo(screenCorners[0].x, screenCorners[0].y)
-                    lineTo(screenCorners[1].x, screenCorners[1].y)
-                    lineTo(screenCorners[2].x, screenCorners[2].y)
-                    lineTo(screenCorners[3].x, screenCorners[3].y)
-                    close()
-                }
-                drawPath(path = path, color = brandGold, style = Stroke(width = 3.dp.toPx()))
-                val centerX = screenCorners.map { it.x }.average().toFloat()
-                val centerY = screenCorners.map { it.y }.average().toFloat()
-                drawCircle(color = brandGold, radius = 6.dp.toPx(), center = Offset(centerX, centerY))
-            }
-        }
-    }
-}
-
-@Composable
 private fun BottomHud(
     isTracking: Boolean,
     captureStatus: String,
@@ -859,7 +795,6 @@ private fun VerificationDialog(
                     color = textColor.copy(alpha = 0.7f), fontSize = 14.sp)
                 Spacer(Modifier.height(16.dp))
 
-                // Voter info card
                 if (voterId.isNotEmpty() || voterName.isNotEmpty()) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -881,7 +816,6 @@ private fun VerificationDialog(
                     Spacer(Modifier.height(16.dp))
                 }
 
-                // QR token card
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -907,7 +841,6 @@ private fun VerificationDialog(
                 }
                 Spacer(Modifier.height(16.dp))
 
-                // OMR image preview
                 Card(
                     shape = RoundedCornerShape(16.dp),
                     elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
@@ -923,7 +856,6 @@ private fun VerificationDialog(
                 }
                 Spacer(Modifier.height(16.dp))
 
-                // Marked candidates with names
                 if (filledIndices.isNotEmpty()) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
