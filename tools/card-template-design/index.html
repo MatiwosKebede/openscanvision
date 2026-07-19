@@ -3,68 +3,174 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NIB Premium Voter Card</title>
-  <link rel="stylesheet" href="style.css" />
-  <!-- QRCode library from CDN -->
+  <title>NIB Premium Voter Card – Larger ArUco, Clear Margins</title>
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #f0ede8;
+      display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
+      gap: 10mm; min-height: 100vh; padding: 8mm;
+      font-family: 'Inter', sans-serif;
+    }
+    .voter-card {
+      width: 85mm; height: 54mm; background: #fcfcfa;
+      border: 2px dashed #c9a237; border-radius: 4mm; padding: 0;
+      position: relative; box-shadow: 0 4px 12px rgba(0,0,0,0.08), 0 0 0 1px rgba(201,162,55,0.2) inset;
+      page-break-after: avoid; transition: transform 0.2s ease; flex-shrink: 0;
+    }
+    .voter-card:hover { transform: scale(1.02); }
+    .voter-card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: repeating-linear-gradient(45deg, transparent, transparent 4mm, rgba(201,162,55,0.02) 4mm, rgba(201,162,55,0.02) 8mm);
+      pointer-events: none; border-radius: 4mm; z-index: 1;
+    }
+
+    /* ─── Larger ArUco markers: 6mm, inset 2mm ─── */
+    .ref-marker {
+      position: absolute; z-index: 10;
+      width: 6mm; height: 6mm;
+      background-size: contain; background-repeat: no-repeat;
+    }
+    .ref-marker-tl { top: 2mm; left: 2mm; background-image: url('markers/5x5_1000-0.svg'); }
+    .ref-marker-tr { top: 2mm; right: 2mm; background-image: url('markers/5x5_1000-1.svg'); }
+    .ref-marker-br { bottom: 2mm; right: 2mm; background-image: url('markers/5x5_1000-2.svg'); }
+    .ref-marker-bl { bottom: 2mm; left: 2mm; background-image: url('markers/5x5_1000-3.svg'); }
+
+    /* QR code – unchanged */
+    .qr-wrapper {
+      position: absolute; top: 3mm; left: 58mm; width: 16mm; height: 18mm; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: #f8f6f0; border: 1.5px solid #c9a237; border-radius: 1.5mm;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .qr-wrapper canvas, .qr-wrapper img { width: 13.5mm !important; height: 13.5mm !important; display: block; border-radius: 0.5mm; }
+    .qr-label { font-size: 1.2mm; font-weight: 600; color: #c9a237; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 0.2mm; }
+
+    /* Header – shifted right to clear larger left marker */
+    .card-header {
+      position: absolute; top: 3mm; left: 8mm; right: 6mm;
+      display: flex; align-items: center;
+      border-bottom: 1.5px solid #c9a237; padding-bottom: 0.8mm; z-index: 2;
+    }
+    .brand { display: flex; align-items: center; gap: 1.5mm; }
+    .brand-icon { width: 18px; height: 18px; flex-shrink: 0; }
+    .brand-name { font-family: 'Playfair Display', serif; font-weight: 700; font-size: 3mm; color: #1a0d02; }
+    .brand-name span { color: #c9a237; }
+
+    /* Centered badge */
+    .badge-centered {
+      position: absolute; left: 50%; transform: translateX(-50%);
+      background: linear-gradient(135deg, #c9a237, #b08c2a); color: #1a0d02;
+      padding: 0.4mm 2.5mm; border-radius: 2mm; font-size: 2mm; font-weight: 700;
+      text-transform: uppercase; box-shadow: 0 1px 2px rgba(0,0,0,0.1); z-index: 2;
+    }
+
+    /* Election title – shifted */
+    .election-title {
+      position: absolute; top: 11mm; left: 8mm; right: 6mm;
+      font-size: 2.2mm; font-weight: 500; color: #4b3a2a; z-index: 2;
+    }
+    .election-title strong { font-weight: 700; color: #1a0d02; }
+
+    /* Voter row – shifted */
+    .voter-row {
+      position: absolute; top: 16mm; left: 8mm; right: 6mm;
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 0.5px solid rgba(201,162,55,0.25); padding-bottom: 0.8mm; z-index: 2;
+    }
+    .voter-info { display: flex; flex-direction: column; gap: 0.3mm; flex: 1; }
+    .voter-name { font-weight: 700; font-size: 3.5mm; color: #1a0d02; }
+    .voter-details { display: flex; align-items: center; gap: 1.5mm; font-size: 2mm; color: #1a0d02; flex-wrap: wrap; }
+    .voter-details .label { font-weight: 500; color: #6b5a4a; font-size: 1.8mm; text-transform: uppercase; }
+    .voter-details .value { font-weight: 600; font-family: 'Inter', monospace; color: #1a0d02; }
+    .voter-details .separator { color: #c9a237; font-weight: 300; }
+
+    /* OMR bubbles – shifted by +2mm left */
+    .bubble-cell {
+      position: absolute; display: flex; align-items: center; gap: 1mm;
+      font-size: 1.9mm; white-space: nowrap; z-index: 2;
+    }
+    .omr-bubble {
+      width: 2.6mm; height: 2.6mm; border: 0.5mm solid #1a0d02; border-radius: 50%;
+      flex-shrink: 0; background: white; box-shadow: inset 0 1px 2px rgba(0,0,0,0.05);
+    }
+    .omr-bubble.checked { background-color: #1a0d02; border-color: #1a0d02; }
+    .candidate-number { font-weight: 700; color: #c9a237; font-size: 2mm; min-width: 3.5mm; text-align: right; }
+    .candidate-name { font-weight: 500; color: #1a0d02; }
+
+    .agenda-label {
+      position: absolute; font-weight: 600; font-size: 1.9mm; color: #1a0d02;
+      white-space: nowrap; z-index: 2;
+    }
+    .agenda-option-cell {
+      position: absolute; display: flex; align-items: center; gap: 1mm;
+      font-size: 1.6mm; white-space: nowrap; z-index: 2;
+    }
+    .option-text { color: #4b3a2a; font-weight: 400; }
+
+    /* Footer – shifted left to 9mm (clear 2mm marker + 6mm width = 8mm) */
+    .card-footer {
+      position: absolute; bottom: 2.5mm; left: 9mm; width: 70mm;
+      border-top: 0.5px solid rgba(201,162,55,0.25); padding-top: 0.5mm;
+      display: flex; justify-content: flex-start; gap: 15mm; align-items: center; z-index: 2;
+    }
+    .footer-text { font-size: 1.4mm; color: #9ca3af; }
+    .footer-text strong { color: #c9a237; font-weight: 600; }
+
+    @media print {
+      body { background: white; padding: 2mm; gap: 4mm; }
+      .voter-card { box-shadow: none !important; border: 2px dashed #c9a237 !important; page-break-inside: avoid; transform: none !important; }
+      .voter-card::before { display: none; }
+      .qr-wrapper { border-color: #c9a237 !important; background: white !important; }
+      .ref-marker { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .omr-bubble.checked { background-color: #1a0d02 !important; border-color: #1a0d02 !important; }
+    }
+  </style>
 </head>
 <body>
-  <!-- ===== CANDIDATE CARD ===== -->
+
+  <!-- CANDIDATE CARD -->
   <div class="voter-card" id="cardCandidate">
+    <div class="ref-marker ref-marker-tl"></div>
+    <div class="ref-marker ref-marker-tr"></div>
+    <div class="ref-marker ref-marker-br"></div>
+    <div class="ref-marker ref-marker-bl"></div>
+    <div class="qr-wrapper" id="qrCandidate"><div class="qr-label">Scan</div></div>
+
     <div class="card-header">
       <div class="brand">
-        <svg class="brand-icon" viewBox="0 0 108 108">
-          <path d="M18 74C30 52 36 38 45 38C54 38 58 64 66 64C74 64 80 50 90 38L90 18L18 18Z" fill="#A06333" />
-          <path d="M18 84C30 62 36 48 45 48C54 48 58 74 66 74C74 74 80 60 90 48L90 90L18 90Z" fill="#c9a237" />
-        </svg>
+        <svg class="brand-icon" viewBox="0 0 108 108"><path d="M18 74C30 52 36 38 45 38C54 38 58 64 66 64C74 64 80 50 90 38L90 18L18 18Z" fill="#A06333"/><path d="M18 84C30 62 36 48 45 48C54 48 58 74 66 74C74 74 80 60 90 48L90 90L18 90Z" fill="#c9a237"/></svg>
         <span class="brand-name">NIB<span>Vote</span></span>
       </div>
-      <span class="badge">Candidate</span>
+      <span class="badge-centered">Candidate</span>
     </div>
 
-    <div class="election-title">
-      <strong>2026 Member Election</strong> · Board of Directors
-    </div>
-
-    <!-- Main QR -->
-    <div class="qr-wrapper" id="qrCandidate">
-      <div class="qr-label">Scan</div>
-    </div>
-
-    <!-- Reference markers (dark squares) -->
-    <div class="ref-marker ref-marker-tl">TL</div>
-    <div class="ref-marker ref-marker-br">BR</div>
-    <div class="ref-marker ref-marker-bl">BL</div>
-
+    <div class="election-title"><strong>2026 Member Election</strong> · Board of Directors</div>
     <div class="voter-row">
       <div class="voter-info">
         <div class="voter-name">Abebech Demissie</div>
         <div class="voter-details">
-          <span class="label">Serial</span>
-          <span class="value">VOTER001</span>
-          <span class="separator">◆</span>
-          <span class="label">Shares</span>
-          <span class="value">34,234</span>
+          <span class="label">Serial</span> <span class="value">VOTER001</span>
+          <span class="separator">◆</span> <span class="label">Shares</span> <span class="value">34,234</span>
         </div>
       </div>
     </div>
 
-    <div class="omr-section">
-      <div class="omr-grid">
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">01</span><span class="candidate-name">Dr. Sintayehu W.</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">02</span><span class="candidate-name">Amanuel Gebre</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">03</span><span class="candidate-name">Tigist Hailu</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">04</span><span class="candidate-name">Michael Chen</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">05</span><span class="candidate-name">Liil Taye</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">06</span><span class="candidate-name">Abdurahman J.</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">07</span><span class="candidate-name">Selamawit Hailu</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">08</span><span class="candidate-name">Yonas Tekle</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">09</span><span class="candidate-name">Mulugeta W.</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">10</span><span class="candidate-name">Hirut Alemu</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">11</span><span class="candidate-name">Bekele Girma</span></div>
-        <div class="candidate-item"><span class="omr-bubble"></span><span class="candidate-number">12</span><span class="candidate-name">Eyerusalem K.</span></div>
-      </div>
-    </div>
+    <!-- Candidate bubbles (shifted left by 2mm) -->
+    <div class="bubble-cell" style="left:8.4mm; top:24.7mm;"><div class="omr-bubble"></div><span class="candidate-number">01</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:31.7mm; top:24.7mm;"><div class="omr-bubble"></div><span class="candidate-number">02</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:55.0mm; top:24.7mm;"><div class="omr-bubble"></div><span class="candidate-number">03</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:8.4mm; top:30.7mm;"><div class="omr-bubble"></div><span class="candidate-number">04</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:31.7mm; top:30.7mm;"><div class="omr-bubble"></div><span class="candidate-number">05</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:55.0mm; top:30.7mm;"><div class="omr-bubble"></div><span class="candidate-number">06</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:8.4mm; top:36.7mm;"><div class="omr-bubble"></div><span class="candidate-number">07</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:31.7mm; top:36.7mm;"><div class="omr-bubble"></div><span class="candidate-number">08</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:55.0mm; top:36.7mm;"><div class="omr-bubble"></div><span class="candidate-number">09</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:8.4mm; top:42.7mm;"><div class="omr-bubble"></div><span class="candidate-number">10</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:31.7mm; top:42.7mm;"><div class="omr-bubble"></div><span class="candidate-number">11</span><span class="candidate-name"></span></div>
+    <div class="bubble-cell" style="left:55.0mm; top:42.7mm;"><div class="omr-bubble"></div><span class="candidate-number">12</span><span class="candidate-name"></span></div>
 
     <div class="card-footer">
       <span class="footer-text">Mark <strong>one</strong> choice</span>
@@ -72,67 +178,61 @@
     </div>
   </div>
 
-  <!-- ===== AGENDA CARD ===== -->
+  <h1>123124234342342342424242<br />
+    3421425235235325235235253<br />
+    2354253235253235253iu<br />
+    325235235235253255<br />
+    352352323525325523452<br />
+    53235252352352532532<br />
+    235235253253525235</h1>
+
+  <!-- AGENDA CARD -->
   <div class="voter-card" id="cardAgenda">
+    <div class="ref-marker ref-marker-tl"></div>
+    <div class="ref-marker ref-marker-tr"></div>
+    <div class="ref-marker ref-marker-br"></div>
+    <div class="ref-marker ref-marker-bl"></div>
+    <div class="qr-wrapper" id="qrAgenda"><div class="qr-label">Scan</div></div>
+
     <div class="card-header">
       <div class="brand">
-        <svg class="brand-icon" viewBox="0 0 108 108">
-          <path d="M18 74C30 52 36 38 45 38C54 38 58 64 66 64C74 74 80 50 90 38L90 18L18 18Z" fill="#A06333" />
-          <path d="M18 84C30 62 36 48 45 48C54 48 58 74 66 74C74 74 80 60 90 48L90 90L18 90Z" fill="#c9a237" />
-        </svg>
+        <svg class="brand-icon" viewBox="0 0 108 108"><path d="M18 74C30 52 36 38 45 38C54 38 58 64 66 64C74 64 80 50 90 38L90 18L18 18Z" fill="#A06333"/><path d="M18 84C30 62 36 48 45 48C54 48 58 74 66 74C74 74 80 60 90 48L90 90L18 90Z" fill="#c9a237"/></svg>
         <span class="brand-name">NIB<span>Vote</span></span>
       </div>
-      <span class="badge">Agenda</span>
+      <span class="badge-centered">Agenda</span>
     </div>
 
-    <div class="election-title">
-      <strong>2026 Agenda Voting</strong> · Shareholder Resolutions
-    </div>
-
-    <div class="qr-wrapper" id="qrAgenda">
-      <div class="qr-label">Scan</div>
-    </div>
-
-    <div class="ref-marker ref-marker-tl">TL</div>
-    <div class="ref-marker ref-marker-br">BR</div>
-    <div class="ref-marker ref-marker-bl">BL</div>
-
+    <div class="election-title"><strong>2026 Agenda Voting</strong> · Shareholder Resolutions</div>
     <div class="voter-row">
       <div class="voter-info">
         <div class="voter-name">Abebech Demissie</div>
         <div class="voter-details">
-          <span class="label">Serial</span>
-          <span class="value">VOTER001</span>
-          <span class="separator">◆</span>
-          <span class="label">Shares</span>
-          <span class="value">34,234</span>
+          <span class="label">Serial</span> <span class="value">VOTER001</span>
+          <span class="separator">◆</span> <span class="label">Shares</span> <span class="value">34,234</span>
         </div>
       </div>
     </div>
 
-    <div class="omr-section">
-      <div class="omr-grid agenda-grid">
-        <span class="agenda-label">Financial Report</span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+    <!-- Agenda labels & bubbles (shifted left by 2mm) -->
+    <span class="agenda-label" style="left:4mm; top:25.0mm;">Financial Report</span>
+    <div class="agenda-option-cell" style="left:29.7mm; top:24.7mm;"><div class="omr-bubble"></div><span class="option-text">Agree</span></div>
+    <div class="agenda-option-cell" style="left:47.7mm; top:24.7mm;"><div class="omr-bubble"></div><span class="option-text">Disagree</span></div>
+    <div class="agenda-option-cell" style="left:65.7mm; top:24.7mm;"><div class="omr-bubble"></div><span class="option-text">Neutral</span></div>
 
-        <span class="agenda-label">Board Rules</span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+    <span class="agenda-label" style="left:4mm; top:31.0mm;">Board Rules</span>
+    <div class="agenda-option-cell" style="left:29.7mm; top:30.7mm;"><div class="omr-bubble"></div><span class="option-text">Agree</span></div>
+    <div class="agenda-option-cell" style="left:47.7mm; top:30.7mm;"><div class="omr-bubble"></div><span class="option-text">Disagree</span></div>
+    <div class="agenda-option-cell" style="left:65.7mm; top:30.7mm;"><div class="omr-bubble"></div><span class="option-text">Neutral</span></div>
 
-        <span class="agenda-label">Dividend Policy</span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
+    <span class="agenda-label" style="left:4mm; top:37.0mm;">Dividend Policy</span>
+    <div class="agenda-option-cell" style="left:29.7mm; top:36.7mm;"><div class="omr-bubble"></div><span class="option-text">Agree</span></div>
+    <div class="agenda-option-cell" style="left:47.7mm; top:36.7mm;"><div class="omr-bubble"></div><span class="option-text">Disagree</span></div>
+    <div class="agenda-option-cell" style="left:65.7mm; top:36.7mm;"><div class="omr-bubble"></div><span class="option-text">Neutral</span></div>
 
-        <span class="agenda-label">CEO Appointment</span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Agree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Disagree</span></span>
-        <span class="agenda-option"><span class="omr-bubble"></span><span class="option-text">Neutral</span></span>
-      </div>
-    </div>
+    <span class="agenda-label" style="left:4mm; top:43.0mm;">CEO Appointment</span>
+    <div class="agenda-option-cell" style="left:29.7mm; top:42.7mm;"><div class="omr-bubble"></div><span class="option-text">Agree</span></div>
+    <div class="agenda-option-cell" style="left:47.7mm; top:42.7mm;"><div class="omr-bubble"></div><span class="option-text">Disagree</span></div>
+    <div class="agenda-option-cell" style="left:65.7mm; top:42.7mm;"><div class="omr-bubble"></div><span class="option-text">Neutral</span></div>
 
     <div class="card-footer">
       <span class="footer-text">Mark <strong>one</strong> per resolution</span>
@@ -140,6 +240,19 @@
     </div>
   </div>
 
-  <script src="script.js"></script>
+  <script>
+    (function() {
+      function g(id,txt){var c=document.getElementById(id);if(!c)return;c.innerHTML='';try{new QRCode(c,{text:txt,width:140,height:140,colorDark:'#1a0d02',colorLight:'#ffffff',correctLevel:QRCode.CorrectLevel.H})}catch(e){console.error(e)}}
+      g('qrCandidate','VX373X1F8Q22');
+      g('qrAgenda','AGN37X1F8Q22');
+      document.querySelectorAll('.voter-card').forEach(card=>{
+        card.addEventListener('click',function(e){
+          var b=e.target.closest('.omr-bubble');
+          if(!b){var cell=e.target.closest('.bubble-cell, .agenda-option-cell');if(cell)b=cell.querySelector('.omr-bubble')}
+          if(b)b.classList.toggle('checked');
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
